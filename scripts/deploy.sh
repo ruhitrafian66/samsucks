@@ -36,10 +36,14 @@ else
   rm -rf "$OUT/js/dev"
   sed -i.bak "s/^export const VERSION = .*/export const VERSION = '$VERSION';/" "$OUT/js/config.js" && rm "$OUT/js/config.js.bak"
 fi
-# Preload every module up front so the TV fetches them in parallel instead of
-# discovering the import graph one level at a time.
-PRELOADS=$(cd "$OUT" && find js -name '*.js' | sort | sed 's|.*|<link rel="modulepreload" href="&">|' | tr '\n' ' ')
-sed -i.bak "s|</head>|$PRELOADS</head>|" "$OUT/index.html" && rm "$OUT/index.html.bak"
+# Bundle all modules into one classic script. Tizen 6.0 (2021 TVs) serves file:// with no
+# MIME type and its Chromium 76 then refuses to load ES modules, so the app hangs on the splash.
+EXTERNAL=""; [ "$DEV" = 1 ] || EXTERNAL="--external:./dev/remote.js"
+npx --yes esbuild@0.25.0 "$OUT/js/main.js" --bundle --format=iife --target=chrome76 $EXTERNAL \
+  --log-level=warning --outfile="$OUT/bundle.js"
+rm -rf "$OUT/js"
+sed -i.bak 's|<script type="module" src="js/main.js"></script>|<script src="bundle.js"></script>|' "$OUT/index.html" && rm "$OUT/index.html.bak"
+grep -q 'src="bundle.js"' "$OUT/index.html" || { echo "index.html script tag not rewritten" >&2; exit 1; }
 echo "built $([ "$DEV" = 1 ] && echo dev || echo release) $VERSION → build/app"
 [ "$INSTALL" = 1 ] || exit 0
 
