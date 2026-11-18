@@ -223,6 +223,9 @@ html.playing .ambience { display: none; }
   margin-top: 14px; font: 600 22px var(--body); color: var(--cream);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
+.tile-person .tile-frame { border-radius: 50%; }
+.tile-person .tile-ph { align-items: center; justify-content: center; padding: 20px; text-align: center; font-size: 24px; }
+.tile-person .tile-cap, .tile-person .tile-sub { text-align: center; }
 .tile-sub {
   margin-top: 4px; font: 400 19px var(--body); color: var(--dim);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
@@ -244,6 +247,7 @@ html.fast .row-track, html.fast .rows-track, html.fast .grid-track, html.fast .r
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .lib-hint { position: absolute; top: 150px; right: 96px; font: 500 22px var(--body); color: var(--dim); }
+.key-red { display: inline-block; width: 18px; height: 18px; border-radius: 4px; background: #E5484D; vertical-align: -2px; }
 .key-yellow { display: inline-block; width: 18px; height: 18px; border-radius: 4px; background: #F5C518; vertical-align: -2px; }
 
 .grid { position: absolute; left: 88px; width: 1776px; overflow: hidden; }
@@ -269,6 +273,7 @@ html.fast .row-track, html.fast .rows-track, html.fast .grid-track, html.fast .r
   font: 400 26px/1.5 var(--body); color: rgba(255, 247, 230, 0.82);
   display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden;
 }
+.detail-tech { margin-top: 10px; height: 27px; font: 500 22px/27px var(--body); color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 1100px; }
 .detail-buttons { margin-top: 34px; height: 80px; white-space: nowrap; }
 
 .btn {
@@ -288,6 +293,9 @@ html.fast .row-track, html.fast .rows-track, html.fast .grid-track, html.fast .r
 .pill.current { color: var(--cream); background: var(--faint); }
 .pill.focus { background: var(--cream); color: var(--bg); }
 .detail-episodes { position: relative; margin: 24px 0 0 -96px; width: 1920px; height: 330px; }
+/* Cast and "more like this" rows; each row is positioned by detail.js. */
+.detail-extras { position: relative; margin: 44px 0 0 -96px; width: 1920px; }
+.detail.no-seasons .detail-seasons, .detail.no-seasons .detail-episodes { display: none; }
 
 /* ---------- player ---------- */
 
@@ -351,9 +359,16 @@ html.fast .row-track, html.fast .rows-track, html.fast .grid-track, html.fast .r
   text-shadow: 0 2px 6px #000, 0 0 3px #000, 0 0 3px #000;
 }
 .osd-on .subs { bottom: 340px; }
+/* Above the track panel, so a subtitle delay or size change can be judged while it's open. */
+.player .subs { z-index: 2; }
+.subs-small .subs { font-size: 34px; }
+.subs-large .subs { font-size: 58px; }
+.subs-xlarge .subs { font-size: 72px; }
+.tracks.searching { width: 960px; }
+.player-error { white-space: pre-line; }
 
 .tracks {
-  position: absolute; right: 0; top: 0; width: 960px; height: 1080px;
+  position: absolute; right: 0; top: 0; width: 1320px; height: 1080px;
   padding: 110px 72px; display: flex;
   background: rgba(11, 13, 18, 0.94);
 }
@@ -368,6 +383,24 @@ html.fast .row-track, html.fast .rows-track, html.fast .grid-track, html.fast .r
 .tracks-opt.on { color: var(--cream); }
 .tracks-opt.on::before { content: '✓  '; color: var(--coral); }
 .tracks-opt.focus { background: var(--cream); color: var(--bg); }
+
+/* Online subtitle search takes over the whole panel. */
+.tracks.searching { padding-top: 80px; padding-bottom: 60px; }
+.tracks.searching .tracks-col { margin-right: 0; }
+.tracks-lang { margin-bottom: 14px; font: 600 30px var(--body); color: var(--cream); }
+.tracks-status { min-height: 32px; margin-bottom: 14px; font: 500 22px/1.4 var(--body); color: var(--dim); }
+.tracks-result { padding: 12px 22px; }
+.tracks-result::before { content: none; }
+.tracks-result-title { font: 600 23px var(--body); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tracks-result-meta { margin-top: 4px; font: 500 18px var(--body); opacity: 0.65; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tracks-foot { margin-top: 16px; font: 500 20px var(--body); color: var(--dim); }
+
+.skip {
+  position: absolute; right: 96px; bottom: 200px; height: 76px; padding: 0 40px;
+  border-radius: 38px; background: var(--cream); color: var(--bg);
+  font: 700 28px/76px var(--body); box-shadow: 0 10px 40px rgba(0, 0, 0, 0.55);
+}
+.osd-on .skip { bottom: 340px; }
 
 .upnext {
   position: absolute; right: 96px; bottom: 120px; width: 660px; padding: 34px 40px;

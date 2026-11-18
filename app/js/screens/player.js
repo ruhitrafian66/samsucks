@@ -13,6 +13,8 @@ import * as router from '../router.js';
 import { log, warn, error } from '../util/log.js';
 import { request } from '../plex/client.js';
 import { parseSubtitles, CueTrack } from '../player/subtitles.js';
+import { subtitleLanguage, stepSubtitleLanguage } from '../util/languages.js';
+import * as store from '../util/store.js';
 
 // What a 2022 Samsung (Tizen 6.5) decodes natively. No DTS on 2018+ models.
 const DIRECT = {
@@ -25,6 +27,42 @@ const TEXT_SUBS = { srt: 1, subrip: 1, ass: 1, ssa: 1, mov_text: 1, vtt: 1, webv
 const OSD_HIDE_MS = 4000;
 const SEEK_COMMIT_MS = 900;
 const TIMELINE_MS = 10000;
+const SKIP_SHOW_MS = 10000;   // how long "Skip Intro" stays up on its own
+const SEARCH_ROWS = 8;        // subtitle search results visible at once
+const MARKER_LABEL = { intro: 'Skip Intro', credits: 'Skip Credits', commercial: 'Skip Ad' };
+
+const SUB_SIZES = [['small', 'Small'], ['medium', 'Medium'], ['large', 'Large'], ['xlarge', 'Extra large']];
+const DELAY_STEP_MS = 500;
+const FILE_OPTS_KEPT = 100;
+
+// Per-file playback choices (how to play it, subtitle timing), remembered by ratingKey.
+function loadFileOpts(key) {
+  return Object.assign({ mode: 'auto', delay: 0 }, store.get('fileOpts', {})[key]);
+}
+
+function saveFileOpts(key, opts) {
+  if (!key) return;
+  const all = store.get('fileOpts', {});
+  if (opts.mode === 'auto' && !opts.delay) delete all[key];
+  else all[key] = { mode: opts.mode, delay: opts.delay, t: Date.now() };
+  // Keep only the most recently changed files so this never grows without bound.
+  const keys = Object.keys(all);
+  if (keys.length > FILE_OPTS_KEPT) {
+    keys.sort((a, b) => all[a].t - all[b].t).slice(0, keys.length - FILE_OPTS_KEPT).forEach(k => { delete all[k]; });
+  }
+  store.set('fileOpts', all);
+}
+
+function subSizeIndex() {
+  const i = SUB_SIZES.findIndex(z => z[0] === store.get('subSize', 'medium'));
+  return i < 0 ? 1 : i;
+}
+
+function delayLabel(ms) {
+  return (ms > 0 ? '+' : ms < 0 ? '−' : '') + (Math.abs(ms) / 1000).toFixed(1) + 's';
+}
+
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 function streamsOf(part, type) {
   return (part && part.Stream || []).filter(s => s.streamType === type);
@@ -51,7 +89,35 @@ function sidecarTwin(part, sub) {
 function subtitleLabel(s) {
   const title = s.displayTitle && s.displayTitle !== 'Unknown' ? s.displayTitle : (s.language || '');
   const kind = (s.codec || '').toUpperCase() + (s.key ? ' · external' : '');
+  // Downloaded subtitles all read "English"; the release name tells them apart.
+  if (title && s.key && s.providerTitle && s.title) return title + ' · ' + s.title;
   return title ? title + (s.key ? ' · external' : '') : kind || 'Subtitle';
+}
+
+// Release-name words: "Feed.2026.1080p.WEB.H264-GRP.mkv" -> feed, 2026, 1080p, web, h264, grp.
+function releaseTokens(name) {
+  return String(name || '').toLowerCase()
+    .replace(/\.(mkv|mp4|m4v|avi|mov|ts|webm|srt|ass|ssa|vtt|sub)$/, '')
+    .replace(/\b([hx])[ .]?(26[45])\b/g, 'h$2')   // x264, H.264, h 264 are the same thing
+    .split(/[^a-z0-9]+/).filter(Boolean);
+}
+
+// How strictly a search result matches the file being played, strictest first:
+// 3 = the provider matched the file itself, 2 = same release name, then the share of
+// release-name words in common (0..1). Subtitles timed for another release drift.
+function matchStrictness(result, fileTokens) {
+  if (result.perfectMatch) return 3;
+  const sub = releaseTokens(result.title);
+  if (!sub.length || !fileTokens.length) return 0;
+  const inFile = {};
+  fileTokens.forEach(t => { inFile[t] = 1; });
+  const seen = {};
+  let common = 0;
+  let unique = 0;
+  sub.forEach(t => { if (!seen[t]) { seen[t] = 1; unique++; if (inFile[t]) common++; } });
+  const fileUnique = Object.keys(inFile).length;
+  if (common === unique && common === fileUnique) return 2;
+  return common / (unique + fileUnique - common);
 }
 
 function cleanSubtitle(text) {
@@ -83,9 +149,10 @@ export function PlayerScreen(initial, { offset = null } = {}) {
   const tInfo = h('span', 'osd-info', times);
   const tLeft = h('span', 'osd-left', times);
   const hintEl = h('div', 'osd-hint', osdBottom);
-  hintEl.innerHTML = '▼ Audio &amp; subtitles';
+  hintEl.innerHTML = '▼ Audio, subtitles &amp; playback';
 
   const panel = h('div', 'tracks hidden', el);
+  const skipEl = h('div', 'skip hidden', el);
   const upnext = h('div', 'upnext hidden', el);
   const errorEl = h('div', 'player-error hidden', el);
 
@@ -115,6 +182,11 @@ export function PlayerScreen(initial, { offset = null } = {}) {
   let cueTrack = null;
   let cueTimer = 0;
   let cueFor = null;
+  let markers = [];
+  let marker = null;        // the intro/credits marker playback is inside, if any
+  let markerAt = 0;
+  const fileOpts = loadFileOpts(initial.ratingKey);
+  el.classList.add('subs-' + SUB_SIZES[subSizeIndex()][0]);
   const playSession = uuid();
 
   const player = createPlayer(stage, {
@@ -122,6 +194,7 @@ export function PlayerScreen(initial, { offset = null } = {}) {
       if (!started) return;
       position = base + ms;
       if (seekTarget == null) renderProgress(position);
+      checkMarker();
     },
     onBuffering(on) { toggleClass(spinner, 'on', on); },
     onEnd() { finished(); },
@@ -156,12 +229,51 @@ export function PlayerScreen(initial, { offset = null } = {}) {
   function showOsd(sticky) {
     toggleClass(el, 'osd-on', true);
     clearTimeout(osdTimer);
-    if (!sticky && !paused) osdTimer = setTimeout(() => toggleClass(el, 'osd-on', false), OSD_HIDE_MS);
+    if (!sticky && !paused) osdTimer = setTimeout(hideOsd, OSD_HIDE_MS);
+    renderSkip();
   }
 
   function hideOsd() {
     clearTimeout(osdTimer);
     toggleClass(el, 'osd-on', false);
+    renderSkip();
+  }
+
+  // --- Skip intro / credits ---------------------------------------------
+
+  // The button shows for a few seconds when a marker starts, and again whenever the
+  // controls are up inside it. While it shows, OK skips.
+  function skipVisible() {
+    return !!marker && !paused && seekTarget == null && panel.classList.contains('hidden') &&
+      (Date.now() - markerAt < SKIP_SHOW_MS || el.classList.contains('osd-on'));
+  }
+
+  function renderSkip() {
+    const on = skipVisible();
+    toggleClass(skipEl, 'hidden', !on);
+    if (on) setText(skipEl, MARKER_LABEL[marker.type] || 'Skip');
+  }
+
+  function checkMarker() {
+    let now = null;
+    for (const m of markers) {
+      if (position >= m.startTimeOffset && position < m.endTimeOffset - 1000) { now = m; break; }
+    }
+    if (now !== marker) {
+      marker = now;
+      markerAt = Date.now();
+    }
+    if (marker || !skipEl.classList.contains('hidden')) renderSkip();
+  }
+
+  function skipMarker() {
+    const m = marker;
+    marker = null;
+    renderSkip();
+    // Credits that run to the end of the file: go straight to what's next.
+    if (m.type === 'credits' && (m.final || m.endTimeOffset >= duration - 5000)) { finished(); return; }
+    seekTarget = Math.min(duration - 3000, m.endTimeOffset);
+    commitSeek();
   }
 
   function renderTitles() {
@@ -196,7 +308,13 @@ export function PlayerScreen(initial, { offset = null } = {}) {
 
   // --- Opening ----------------------------------------------------------
 
+  // What we'd do left to ourselves; the per-file "Playback" setting can override it.
   function decideMode() {
+    if (fileOpts.mode === 'direct' || fileOpts.mode === 'hls') return fileOpts.mode;
+    return autoMode();
+  }
+
+  function autoMode() {
     const directOk = DIRECT.container[media.container] && DIRECT.video[media.videoCodec] &&
       (!audioStream || DIRECT.audio[audioStream.codec]);
     const subsOk = !subStream || isEmbeddedText(subStream) || isSidecarText(subStream);
@@ -208,6 +326,7 @@ export function PlayerScreen(initial, { offset = null } = {}) {
     const t0 = Date.now();
     started = false;
     toggleClass(spinner, 'on', true);
+    errorEl.classList.add('hidden');
     let url;
     if (mode === 'direct') {
       base = 0;
@@ -300,7 +419,7 @@ export function PlayerScreen(initial, { offset = null } = {}) {
       .catch(e => warn('subtitle fetch failed', e.message));
     clearInterval(cueTimer);
     cueTimer = setInterval(() => {
-      if (cueTrack && started) setText(subs, cueTrack.at(base + player.time()));
+      if (cueTrack && started) setText(subs, cueTrack.at(base + player.time() - fileOpts.delay));
     }, 120);
   }
 
@@ -316,6 +435,7 @@ export function PlayerScreen(initial, { offset = null } = {}) {
       const audios = streamsOf(part, 2);
       audioStream = audios.find(s => s.selected) || audios[0] || null;
       subStream = streamsOf(part, 3).find(s => s.selected) || null;
+      markers = (item.Marker || []).filter(m => MARKER_LABEL[m.type] && m.endTimeOffset > m.startTimeOffset);
       renderTitles();
       mode = decideMode();
       if (offset == null) offset = item.viewOffset || 0;
@@ -330,7 +450,7 @@ export function PlayerScreen(initial, { offset = null } = {}) {
 
   function failed(msg) {
     if (!alive) return;
-    if (mode === 'direct' && !triedFallback && media) {
+    if (mode === 'direct' && !triedFallback && media && fileOpts.mode !== 'direct') {
       // The file looked direct-playable but the TV choked: let Plex convert it.
       warn('direct play failed (' + msg + '), falling back to HLS');
       triedFallback = true;
@@ -341,7 +461,8 @@ export function PlayerScreen(initial, { offset = null } = {}) {
     error('playback failed', msg);
     toggleClass(spinner, 'on', false);
     errorEl.classList.remove('hidden');
-    setText(errorEl, 'Playback failed: ' + msg);
+    setText(errorEl, 'Playback failed: ' + msg + (fileOpts.mode === 'auto' ? ''
+      : '\n' + (fileOpts.mode === 'direct' ? 'Direct play' : 'Convert') + ' is forced for this file. Press ▼ and choose Auto under Playback.'));
   }
 
   // --- Controls ---------------------------------------------------------
@@ -403,29 +524,87 @@ export function PlayerScreen(initial, { offset = null } = {}) {
   // --- Audio / subtitle picker ------------------------------------------
 
   let panelCol = 0;
-  let panelIndex = [0, 0];
-  let panelLists = [[], []];
+  let panelIndex = [0, 0, 0];
+  let panelLists = [[], [], []];
+  let panelMode = 'tracks';   // 'tracks' | 'search'
+  // Online subtitle search: results come from the server's subtitle agent.
+  const search = { results: [], index: 0, status: '', busy: false, generation: 0 };
 
   function openPanel() {
     const audios = streamsOf(part, 2);
     const texts = streamsOf(part, 3);
     panelLists = [
       audios.map(s => ({ label: s.displayTitle || s.language || 'Track', stream: s, on: s === audioStream })),
-      [{ label: 'Off', stream: null, on: !subStream }].concat(texts.map(s => ({ label: subtitleLabel(s), stream: s, on: s === subStream }))),
+      [{ label: 'Off', stream: null, on: !subStream }]
+        .concat(texts.map(s => ({ label: subtitleLabel(s), stream: s, on: s === subStream })))
+        .concat(item.ratingKey ? [{ label: 'Search online…', search: true }] : []),
+      playbackOptions(),
     ];
     panelIndex = panelLists.map(l => Math.max(0, l.findIndex(x => x.on)));
     panelCol = 0;
+    panelMode = 'tracks';
     renderPanel();
     panel.classList.remove('hidden');
     hideOsd();
   }
 
+  // Third column: settings for this file only, plus subtitle size (all files).
+  function playbackOptions() {
+    const auto = autoMode() === 'direct' ? 'direct play' : 'convert';
+    return [
+      { label: 'Auto (' + auto + ')', playMode: 'auto', on: fileOpts.mode === 'auto' },
+      { label: 'Force direct play', playMode: 'direct', on: fileOpts.mode === 'direct' },
+      { label: 'Force convert', playMode: 'hls', on: fileOpts.mode === 'hls' },
+      { label: 'Subtitles later  +0.5s', delayBy: DELAY_STEP_MS },
+      { label: 'Subtitles earlier  −0.5s', delayBy: -DELAY_STEP_MS },
+      { label: 'Subtitle delay  ' + delayLabel(fileOpts.delay) + (fileOpts.delay ? '  ·  reset' : ''), delayBy: 0 },
+      { label: 'Subtitle size  ' + SUB_SIZES[subSizeIndex()][1], size: true },
+    ];
+  }
+
+  function setPlayMode(m) {
+    closePanel();
+    if (fileOpts.mode === m && errorEl.classList.contains('hidden')) return;
+    fileOpts.mode = m;
+    saveFileOpts(item.ratingKey, fileOpts);
+    const wanted = decideMode();
+    if (wanted === mode && errorEl.classList.contains('hidden')) return;
+    if (mode === 'hls') session.server.stopTranscode(playSession);
+    log('playback mode for this file:', m, '->', wanted);
+    mode = wanted;
+    triedFallback = false;
+    open(position).catch(e => failed(e.message));
+  }
+
+  // These keep the panel open so they can be pressed repeatedly.
+  function choosePlayback(opt) {
+    if (opt.playMode) { setPlayMode(opt.playMode); return; }
+    if (opt.delayBy != null) {
+      fileOpts.delay = opt.delayBy ? Math.max(-60000, Math.min(60000, fileOpts.delay + opt.delayBy)) : 0;
+      saveFileOpts(item.ratingKey, fileOpts);
+    } else if (opt.size) {
+      const next = SUB_SIZES[(subSizeIndex() + 1) % SUB_SIZES.length][0];
+      SUB_SIZES.forEach(z => toggleClass(el, 'subs-' + z[0], z[0] === next));
+      store.set('subSize', next);
+    }
+    panelLists[2] = playbackOptions();
+    renderPanel();
+  }
+
+  function closePanel() {
+    panel.classList.add('hidden');
+    search.generation++;   // drop any search still in flight
+    search.busy = false;
+  }
+
   function renderPanel() {
     panel.innerHTML = '';
-    ['Audio', 'Subtitles'].forEach((name, c) => {
+    toggleClass(panel, 'searching', panelMode === 'search');
+    if (panelMode === 'search') { renderSearch(); return; }
+    ['Audio', 'Subtitles', 'Playback'].forEach((name, c) => {
       const col = h('div', 'tracks-col', panel);
       const head = h('div', 'tracks-head', col);
-      head.innerHTML = c === 0 ? icons.audio : icons.subtitles;
+      head.innerHTML = [icons.audio, icons.subtitles, icons.gear][c];
       h('span', '', head).textContent = name;
       panelLists[c].forEach((opt, i) => {
         const row = h('div', 'tracks-opt', col);
@@ -436,6 +615,106 @@ export function PlayerScreen(initial, { offset = null } = {}) {
     });
   }
 
+  function renderSearch() {
+    const col = h('div', 'tracks-col', panel);
+    const head = h('div', 'tracks-head', col);
+    head.innerHTML = icons.search;
+    h('span', '', head).textContent = 'Search subtitles';
+    h('div', 'tracks-lang', col).textContent = '◀  ' + subtitleLanguage()[1] + '  ▶';
+    h('div', 'tracks-status', col).textContent = search.status;
+    const n = search.results.length;
+    const top = Math.max(0, Math.min(n - SEARCH_ROWS, search.index - Math.floor(SEARCH_ROWS / 2)));
+    search.results.slice(top, top + SEARCH_ROWS).forEach((r, k) => {
+      const row = h('div', 'tracks-opt tracks-result', col);
+      h('div', 'tracks-result-title', row).textContent = r.title || r.extendedDisplayTitle || r.displayTitle || 'Subtitle';
+      const bits = [r.providerTitle, (r.codec || '').toUpperCase()];
+      if (r.downloaded) bits.push('Downloaded');
+      if (r.strictness >= 3) bits.push('Matches this file');
+      else if (r.strictness >= 2) bits.push('Same release');
+      if (r.hearingImpaired) bits.push('SDH');
+      if (r.forced) bits.push('Forced');
+      h('div', 'tracks-result-meta', row).textContent = bits.filter(Boolean).join('  ·  ');
+      toggleClass(row, 'focus', !search.busy && top + k === search.index);
+    });
+    h('div', 'tracks-foot', col).textContent = n
+      ? (search.index + 1) + ' of ' + n + '   ·   OK to download   ·   ◀ ▶ language'
+      : '◀ ▶ language   ·   Back to return';
+  }
+
+  async function runSearch() {
+    const server = session.server;
+    const gen = ++search.generation;
+    const lang = subtitleLanguage();
+    search.results = [];
+    search.index = 0;
+    search.busy = false;
+    search.status = 'Searching for ' + lang[1] + ' subtitles…';
+    renderPanel();
+    try {
+      const found = await server.searchSubtitles(item.ratingKey, { language: lang[0] });
+      if (gen !== search.generation || !alive) return;
+      // Only text formats: we draw these ourselves, so the video is never re-encoded.
+      // Strictest match to this file first; the provider's score only breaks ties.
+      const fileTokens = releaseTokens(String(part.file || '').split(/[\\/]/).pop());
+      search.results = found.filter(r => r.key && (!r.codec || TEXT_SUBS[r.codec]));
+      search.results.forEach(r => { r.strictness = matchStrictness(r, fileTokens); });
+      search.results.sort((a, b) => b.strictness - a.strictness || (b.score || 0) - (a.score || 0));
+      search.status = search.results.length ? '' : 'No ' + lang[1] + ' subtitles found.';
+    } catch (e) {
+      if (gen !== search.generation || !alive) return;
+      warn('subtitle search failed', e.message);
+      search.status = e.status === 401 || e.status === 403
+        ? 'This account isn\'t allowed to search for subtitles on this server.'
+        : 'Search failed (' + (e.message || e) + ').';
+    }
+    if (panelMode === 'search' && !panel.classList.contains('hidden')) renderPanel();
+  }
+
+  // The server downloads in the background; wait for the new stream to appear on the part.
+  async function downloadResult(result) {
+    const server = session.server;
+    const gen = ++search.generation;
+    const stale = () => gen !== search.generation || !alive;
+    // A result the server already has is just another track: switch to it.
+    // (Search results carry their own ids; sourceKey is what ties one to a stream on the part.)
+    const same = s => !!s.key && (s.key === result.key || (!!result.sourceKey && s.sourceKey === result.sourceKey));
+    const have = streamsOf(part, 3).find(same);
+    if (have) { choose(1, { stream: have }); return; }
+    const known = {};
+    streamsOf(part, 3).forEach(s => { known[s.id] = 1; });
+    search.busy = true;
+    search.status = 'Downloading…';
+    renderPanel();
+    try {
+      await server.downloadSubtitle(item.ratingKey, result, subtitleLanguage()[0]);
+      let fresh = null;
+      for (let i = 0; i < 12 && !fresh; i++) {
+        await sleep(i < 4 ? 1000 : 2000);
+        if (stale()) return;
+        const full = await server.metadata(item.ratingKey).catch(() => null);
+        if (stale()) return;
+        const parts = full && full.Media ? full.Media.reduce((all, m) => all.concat(m.Part || []), []) : [];
+        const newPart = parts.find(p => p.id === part.id);
+        fresh = newPart && (streamsOf(newPart, 3).find(same) || streamsOf(newPart, 3).find(s => !known[s.id]));
+        if (fresh) {
+          // Adopt the refreshed stream list, keeping the current audio choice.
+          part.Stream = newPart.Stream;
+          if (audioStream) audioStream = streamsOf(part, 2).find(s => s.id === audioStream.id) || audioStream;
+        }
+      }
+      if (!fresh) throw new Error('the server never added the subtitle');
+      log('subtitle downloaded:', fresh.displayTitle || fresh.title);
+      search.busy = false;
+      await choose(1, { stream: fresh });
+    } catch (e) {
+      if (stale()) return;
+      warn('subtitle download failed', e.message);
+      search.busy = false;
+      search.status = 'Download failed (' + (e.message || e) + ').';
+      if (panelMode === 'search' && !panel.classList.contains('hidden')) renderPanel();
+    }
+  }
+
   async function choose(col, opt) {
     const server = session.server;
     if (col === 0) audioStream = opt.stream;
@@ -444,7 +723,7 @@ export function PlayerScreen(initial, { offset = null } = {}) {
       audioStreamID: audioStream ? audioStream.id : undefined,
       subtitleStreamID: subStream ? subStream.id : 0,
     });
-    panel.classList.add('hidden');
+    closePanel();
     const wanted = decideMode();
     if (wanted === 'direct' && mode === 'direct') {
       applyTracks();
@@ -458,14 +737,49 @@ export function PlayerScreen(initial, { offset = null } = {}) {
     }
   }
 
+  function searchKey(action) {
+    if (action === 'back') {
+      search.generation++;
+      search.busy = false;
+      panelMode = 'tracks';
+      renderPanel();
+      return true;
+    }
+    if (search.busy) return true;
+    if (action === 'left' || action === 'right') {
+      stepSubtitleLanguage(action === 'right' ? 1 : -1);
+      runSearch();
+      return true;
+    }
+    const n = search.results.length;
+    if (action === 'up') search.index = Math.max(0, search.index - 1);
+    if (action === 'down') search.index = Math.min(Math.max(0, n - 1), search.index + 1);
+    if (action === 'enter') {
+      if (n) downloadResult(search.results[search.index]);
+      else runSearch();
+      return true;
+    }
+    renderPanel();
+    return true;
+  }
+
   function panelKey(action) {
-    if (action === 'back' || action === 'up' && panelIndex[panelCol] === 0) { panel.classList.add('hidden'); return true; }
-    if (action === 'left' || action === 'right') panelCol = action === 'left' ? 0 : 1;
+    if (panelMode === 'search') return searchKey(action);
+    if (action === 'back' || action === 'up' && panelIndex[panelCol] === 0) { closePanel(); return true; }
+    if (action === 'left') panelCol = Math.max(0, panelCol - 1);
+    if (action === 'right') panelCol = Math.min(panelLists.length - 1, panelCol + 1);
     if (action === 'up') panelIndex[panelCol]--;
     if (action === 'down') panelIndex[panelCol] = Math.min(panelLists[panelCol].length - 1, panelIndex[panelCol] + 1);
     if (action === 'enter') {
       const opt = panelLists[panelCol][panelIndex[panelCol]];
-      if (opt) choose(panelCol, opt);
+      if (opt && opt.search) {
+        panelMode = 'search';
+        runSearch();
+      } else if (opt && panelCol === 2) {
+        choosePlayback(opt);
+      } else if (opt) {
+        choose(panelCol, opt);
+      }
       return true;
     }
     renderPanel();
@@ -490,7 +804,7 @@ export function PlayerScreen(initial, { offset = null } = {}) {
     report('stopped');
     clearInterval(timelineTimer);
     player.close();
-    if (item.type !== 'episode') { exit(); return; }
+    if (item.type !== 'episode' || !store.get('autoplayNext', true)) { exit(); return; }
     try { nextItem = await nextEpisode(); } catch (e) { nextItem = null; }
     if (!alive) return;
     if (!nextItem) { exit(); return; }
@@ -563,6 +877,7 @@ export function PlayerScreen(initial, { offset = null } = {}) {
       switch (action) {
         case 'enter':
           if (seekTarget != null) commitSeek();
+          else if (skipVisible()) skipMarker();
           else if (el.classList.contains('osd-on') || paused) togglePause();
           else showOsd();
           return true;

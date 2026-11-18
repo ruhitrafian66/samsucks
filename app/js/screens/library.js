@@ -1,5 +1,6 @@
 // A whole library as a virtualized poster grid, loaded page by page.
-// Yellow cycles the sort; CH▲/CH▼ jump by letter (title sort) or by page.
+// Yellow cycles the sort; red toggles unwatched-only; CH▲/CH▼ jump by letter
+// (title sort) or by page. `filters` narrows it, e.g. { actor: id } for a cast member.
 import { h, setText } from '../util/dom.js';
 import { Grid } from '../ui/grid.js';
 import { useAmbience } from '../ui/backdrop.js';
@@ -18,7 +19,7 @@ const SORTS = [
   { id: 'audienceRating:desc', label: 'Rating' },
 ];
 
-export function LibraryScreen(section) {
+export function LibraryScreen(section, { filters = null } = {}) {
   const el = h('div', 'screen library');
   const ambience = useAmbience();
   const head = h('header', 'lib-head', el);
@@ -27,15 +28,23 @@ export function LibraryScreen(section) {
   const sortEl = h('div', 'lib-sort', head);
   const focusInfo = h('div', 'lib-focus', el);
   const hint = h('div', 'lib-hint', el);
-  hint.innerHTML = '<i class="key-yellow"></i> Sort &nbsp;&nbsp; CH ▲▼ Jump';
+  hint.innerHTML = '<i class="key-red"></i> Unwatched &nbsp;&nbsp; <i class="key-yellow"></i> Sort &nbsp;&nbsp; CH ▲▼ Jump';
 
   let sortIndex = 0;
+  let unwatchedOnly = false;
   let pages = new Map();     // page -> 'loading' | true
   let items = [];
   let letters = [];          // [{ title: 'A', start: 0 }]
   let generation = 0;
 
   const type = section.type === 'show' ? 2 : 1;
+  const noun = section.type === 'show' ? 'show' : 'movie';
+
+  function activeFilters() {
+    const f = Object.assign({}, filters);
+    if (unwatchedOnly) f[type === 2 ? 'unwatchedLeaves' : 'unwatched'] = 1;
+    return f;
+  }
 
   const grid = new Grid({
     top: 200, height: 880, total: 0,
@@ -65,16 +74,13 @@ export function LibraryScreen(section) {
     pages.set(p, 'loading');
     const gen = generation;
     try {
-      const res = await session.server.items(section.key, p * PAGE, PAGE, { sort: SORTS[sortIndex].id, type });
+      const res = await session.server.items(section.key, p * PAGE, PAGE, { sort: SORTS[sortIndex].id, type, filters: activeFilters() });
       if (gen !== generation) return;
       res.items.forEach((it, i) => { items[p * PAGE + i] = it; });
       pages.set(p, true);
-      if (grid.total !== res.total) {
-        grid.setTotal(res.total);
-        setText(count, res.total + (section.type === 'show' ? ' shows' : ' movies'));
-      } else {
-        grid.refresh();
-      }
+      setText(count, res.total + (unwatchedOnly ? ' unwatched ' : ' ') + noun + (res.total === 1 ? '' : 's'));
+      if (grid.total !== res.total) grid.setTotal(res.total);
+      else grid.refresh();
       if (p === 0 && res.items[0]) grid.onFocus(grid.current());
     } catch (e) {
       pages.delete(p);
@@ -86,7 +92,7 @@ export function LibraryScreen(section) {
     letters = [];
     if (SORTS[sortIndex].id !== 'titleSort') return;
     try {
-      const mc = await session.server.get('/library/sections/' + section.key + '/firstCharacter', { type });
+      const mc = await session.server.get('/library/sections/' + section.key + '/firstCharacter', Object.assign({ type }, activeFilters()));
       let start = 0;
       letters = (mc.Directory || []).map(d => {
         const l = { title: d.title, start };
@@ -100,7 +106,9 @@ export function LibraryScreen(section) {
     generation++;
     pages = new Map();
     items = [];
-    setText(sortEl, 'Sorted by ' + SORTS[sortIndex].label);
+    setText(sortEl, (unwatchedOnly ? 'Unwatched  ·  ' : '') + 'Sorted by ' + SORTS[sortIndex].label);
+    setText(count, '');
+    setText(focusInfo, '');
     grid.total = 0;
     grid.index = 0;
     grid.refresh();
@@ -135,6 +143,7 @@ export function LibraryScreen(section) {
         case 'pagedown': jump(1); return true;
         case 'enter': grid.select(); return true;
         case 'play': case 'playpause': if (grid.current()) playItem(grid.current()); return true;
+        case 'red': unwatchedOnly = !unwatchedOnly; reload(); return true;
         case 'yellow': sortIndex = (sortIndex + 1) % SORTS.length; reload(); return true;
         case 'back':
           if (grid.index > grid.cols * 2) { grid.focusIndex(0); return true; }

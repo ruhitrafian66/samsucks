@@ -29,6 +29,7 @@ export class Row {
     this.ring.style.left = (LEFT - 8) + 'px';
     this.ring.style.width = (this.size.w + 16) + 'px';
     this.ring.style.height = (this.size.h + 16) + 'px';
+    if (kind === 'person') this.ring.style.borderRadius = '50%';
 
     this.captionH = caption ? 70 : 0;
     clip.style.height = (this.size.h + this.captionH + 24) + 'px';

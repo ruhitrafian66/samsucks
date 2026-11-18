@@ -57,18 +57,19 @@ export class Server {
     return (mc.Hub || []).filter(h => h.size > 0 && SUPPORTED_HUB_TYPES[h.type] && h.Metadata);
   }
 
-  async items(sectionId, start, size, { sort = 'titleSort', type } = {}) {
-    const mc = await this.get('/library/sections/' + sectionId + '/all', {
+  // filters: extra Plex filter params, e.g. { unwatched: 1 } or { actor: 123 }.
+  async items(sectionId, start, size, { sort = 'titleSort', type, filters } = {}) {
+    const mc = await this.get('/library/sections/' + sectionId + '/all', Object.assign({
       sort, type,
       'X-Plex-Container-Start': start,
       'X-Plex-Container-Size': size,
       excludeFields: 'summary,tagline',
-    });
+    }, filters));
     return { total: mc.totalSize != null ? mc.totalSize : mc.size, items: mc.Metadata || [] };
   }
 
   async metadata(ratingKey) {
-    const mc = await this.get('/library/metadata/' + ratingKey, { includeOnDeck: 1, includeExtras: 0 });
+    const mc = await this.get('/library/metadata/' + ratingKey, { includeOnDeck: 1, includeExtras: 0, includeMarkers: 1 });
     const item = (mc.Metadata || [])[0];
     if (item && mc.OnDeck && mc.OnDeck.Metadata) item.onDeck = mc.OnDeck.Metadata[0];
     return item;
@@ -77,6 +78,36 @@ export class Server {
   async children(ratingKey) {
     const mc = await this.get('/library/metadata/' + ratingKey + '/children', { excludeAllLeaves: 1 });
     return mc.Metadata || [];
+  }
+
+  // "More like this" and similar rows for a movie or show.
+  async related(ratingKey) {
+    const mc = await this.get('/hubs/metadata/' + ratingKey + '/related', { count: 16 }, { maxAge: 300000 });
+    return (mc.Hub || []).filter(h => h.size > 0 && SUPPORTED_HUB_TYPES[h.type] && h.Metadata);
+  }
+
+  // Ask the server's subtitle agent (OpenSubtitles) what it can find for this item.
+  // language is ISO 639-1 ("en"). Results are Stream objects with a key to download.
+  async searchSubtitles(ratingKey, { language = 'en', hearingImpaired = 0, forced = 0 } = {}) {
+    const json = await request(this.uri + '/library/metadata/' + ratingKey + '/subtitles', {
+      token: this.token, params: { language, hearingImpaired, forced }, timeout: 30000,
+    });
+    return (json.MediaContainer || json).Stream || [];
+  }
+
+  // Have the server download one search result. It is saved with the item's metadata and
+  // shows up as an external subtitle stream a moment later (the request returns first).
+  downloadSubtitle(ratingKey, result, language) {
+    return request(this.uri + '/library/metadata/' + ratingKey + '/subtitles', {
+      method: 'PUT', token: this.token, timeout: 30000, raw: true,
+      params: {
+        key: result.key, codec: result.codec,
+        language: result.languageCode || language,
+        hearingImpaired: result.hearingImpaired ? 1 : 0,
+        forced: result.forced ? 1 : 0,
+        providerTitle: result.providerTitle,
+      },
+    });
   }
 
   async search(q) {

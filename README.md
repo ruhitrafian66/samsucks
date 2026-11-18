@@ -107,15 +107,19 @@ choose **Add to Home**.
 | Arrows / OK | Move around / select |
 | Play/Pause | Play whatever is focused, or pause and resume |
 | Back | Go back (while watching, the first press hides the controls) |
-| ▼ while watching | Audio and subtitle tracks |
+| ▼ while watching | Audio and subtitle tracks, **Search online…** to find and download subtitles, and per-file playback settings (force direct play or convert, subtitle delay and size) |
+| OK on **Skip Intro** / **Skip Credits** | Jump past the intro or credits (when Plex has detected them) |
 | ◀ ▶ while watching | Seek; hold to go faster |
 | Yellow | Change the sort order in a library |
+| Red | Show only unwatched items in a library |
 | CH ▲ / CH ▼ | Jump by letter in a library |
 
 What's in it: home rows (Continue Watching, On Deck, Recently Added…), full library
 grids, search with the TV keyboard, movie and show pages with seasons and episodes,
+cast and "more like this" rows (pick an actor to see everything of theirs in that library),
 resume and mark watched, audio and subtitle picker (including external `.srt` files),
-up-next autoplay, and watch progress synced back to Plex.
+online subtitle search through your Plex server, skip intro and credits, up-next autoplay,
+and watch progress synced back to Plex.
 
 ## Why it's fast
 

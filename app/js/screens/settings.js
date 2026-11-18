@@ -8,6 +8,8 @@ import * as router from '../router.js';
 import { ServerPicker } from './login.js';
 import { error } from '../util/log.js';
 import { useAmbience, setLegacyGradients, legacyGradients } from '../ui/backdrop.js';
+import { subtitleLanguage, stepSubtitleLanguage } from '../util/languages.js';
+import * as store from '../util/store.js';
 
 export function SettingsScreen() {
   const el = h('div', 'screen settings');
@@ -25,6 +27,8 @@ export function SettingsScreen() {
     items = [
       { label: 'Server', value: session.server ? session.server.name : '—', run: switchServer },
       { label: 'Signed in as', value: session.user ? session.user.title : '—', run: doSignOut, action: 'Sign out' },
+      { label: 'Play next episode automatically', value: store.get('autoplayNext', true) ? 'On' : 'Off', run: () => { store.set('autoplayNext', !store.get('autoplayNext', true)); build(); } },
+      { label: 'Subtitle search language', value: subtitleLanguage()[1], run: () => { stepSubtitleLanguage(1); build(); } },
       { label: 'Performance overlay', value: hudEnabled() ? 'On' : 'Off', run: () => { setHud(!hudEnabled()); build(); } },
       // For before/after recordings: brings back the full-screen gradients that took ~2s per repaint.
       { label: 'Demo: original slow renderer', value: legacyGradients() ? 'On' : 'Off', run: () => { setLegacyGradients(!legacyGradients()); build(); } },

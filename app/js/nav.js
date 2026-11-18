@@ -20,8 +20,8 @@ export function playItem(item, opts) {
   router.push(PlayerScreen(item, opts || {}));
 }
 
-export function openLibrary(section) {
-  router.push(LibraryScreen(section));
+export function openLibrary(section, opts) {
+  router.push(LibraryScreen(section, opts));
 }
 
 export function openSearch() {
