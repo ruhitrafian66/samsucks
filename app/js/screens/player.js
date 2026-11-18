@@ -94,6 +94,32 @@ function subtitleLabel(s) {
   return title ? title + (s.key ? ' · external' : '') : kind || 'Subtitle';
 }
 
+// Release-name words: "Feed.2026.1080p.WEB.H264-GRP.mkv" -> feed, 2026, 1080p, web, h264, grp.
+function releaseTokens(name) {
+  return String(name || '').toLowerCase()
+    .replace(/\.(mkv|mp4|m4v|avi|mov|ts|webm|srt|ass|ssa|vtt|sub)$/, '')
+    .replace(/\b([hx])[ .]?(26[45])\b/g, 'h$2')   // x264, H.264, h 264 are the same thing
+    .split(/[^a-z0-9]+/).filter(Boolean);
+}
+
+// How strictly a search result matches the file being played, strictest first:
+// 3 = the provider matched the file itself, 2 = same release name, then the share of
+// release-name words in common (0..1). Subtitles timed for another release drift.
+function matchStrictness(result, fileTokens) {
+  if (result.perfectMatch) return 3;
+  const sub = releaseTokens(result.title);
+  if (!sub.length || !fileTokens.length) return 0;
+  const inFile = {};
+  fileTokens.forEach(t => { inFile[t] = 1; });
+  const seen = {};
+  let common = 0;
+  let unique = 0;
+  sub.forEach(t => { if (!seen[t]) { seen[t] = 1; unique++; if (inFile[t]) common++; } });
+  const fileUnique = Object.keys(inFile).length;
+  if (common === unique && common === fileUnique) return 2;
+  return common / (unique + fileUnique - common);
+}
+
 function cleanSubtitle(text) {
   return String(text || '')
     .replace(/\{\\[^}]*\}/g, '')        // ASS override tags
@@ -603,7 +629,8 @@ export function PlayerScreen(initial, { offset = null } = {}) {
       h('div', 'tracks-result-title', row).textContent = r.title || r.extendedDisplayTitle || r.displayTitle || 'Subtitle';
       const bits = [r.providerTitle, (r.codec || '').toUpperCase()];
       if (r.downloaded) bits.push('Downloaded');
-      if (r.perfectMatch) bits.push('Matches this file');
+      if (r.strictness >= 3) bits.push('Matches this file');
+      else if (r.strictness >= 2) bits.push('Same release');
       if (r.hearingImpaired) bits.push('SDH');
       if (r.forced) bits.push('Forced');
       h('div', 'tracks-result-meta', row).textContent = bits.filter(Boolean).join('  ·  ');
@@ -627,8 +654,11 @@ export function PlayerScreen(initial, { offset = null } = {}) {
       const found = await server.searchSubtitles(item.ratingKey, { language: lang[0] });
       if (gen !== search.generation || !alive) return;
       // Only text formats: we draw these ourselves, so the video is never re-encoded.
-      search.results = found.filter(r => r.key && (!r.codec || TEXT_SUBS[r.codec]))
-        .sort((a, b) => (b.perfectMatch ? 1 : 0) - (a.perfectMatch ? 1 : 0) || (b.score || 0) - (a.score || 0));
+      // Strictest match to this file first; the provider's score only breaks ties.
+      const fileTokens = releaseTokens(String(part.file || '').split(/[\\/]/).pop());
+      search.results = found.filter(r => r.key && (!r.codec || TEXT_SUBS[r.codec]));
+      search.results.forEach(r => { r.strictness = matchStrictness(r, fileTokens); });
+      search.results.sort((a, b) => b.strictness - a.strictness || (b.score || 0) - (a.score || 0));
       search.status = search.results.length ? '' : 'No ' + lang[1] + ' subtitles found.';
     } catch (e) {
       if (gen !== search.generation || !alive) return;
