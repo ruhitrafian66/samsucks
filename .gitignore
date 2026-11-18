@@ -41,3 +41,7 @@ npm-debug.log*
 
 # Promo material (videos, graphics, drafts); final README media goes in docs/media/
 marketing/
+
+# Personal notes (LAN IPs, local paths); keep out of the public fork
+/CLAUDE.md
+/samsung-tv-samsucks.md
