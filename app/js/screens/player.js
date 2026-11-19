@@ -27,7 +27,7 @@ const TEXT_SUBS = { srt: 1, subrip: 1, ass: 1, ssa: 1, mov_text: 1, vtt: 1, webv
 const OSD_HIDE_MS = 4000;
 const CONTROLS_HIDE_MS = 8000; // longer while a control button has focus
 const JUMP_BACK_MS = 10000;
-const JUMP_FWD_MS = 30000;
+const JUMP_FWD_MS = 10000;
 const UPNEXT_SECONDS = 10;
 // The button row under the seek bar, left to right.
 const CONTROLS = ['prev', 'back', 'play', 'fwd', 'next', 'tracks', 'settings'];
@@ -157,7 +157,7 @@ export function PlayerScreen(initial, { offset = null } = {}) {
   const transport = h('div', 'osd-transport', controls);
   const extras = h('div', 'osd-extras', controls);
   const btn = {};
-  [['prev', icons.previous], ['back', icons.back10], ['play', icons.pause], ['fwd', icons.forward30], ['next', icons.next],
+  [['prev', icons.previous], ['back', icons.back10], ['play', icons.pause], ['fwd', icons.forward10], ['next', icons.next],
     ['tracks', icons.subtitles], ['settings', icons.gear]].forEach(([id, icon], i) => {
     btn[id] = h('div', 'osd-btn osd-btn-' + id, i < 5 ? transport : extras);
     btn[id].innerHTML = icon;
@@ -274,7 +274,7 @@ export function PlayerScreen(initial, { offset = null } = {}) {
       case 'prev': return 'Previous episode' + (prevItem ? '  ·  ' + ep(prevItem) : '');
       case 'next': return 'Next episode' + (nextItem ? '  ·  ' + ep(nextItem) : '');
       case 'back': return 'Back 10 seconds';
-      case 'fwd': return 'Forward 30 seconds';
+      case 'fwd': return 'Forward 10 seconds';
       case 'play': return paused ? 'Play' : 'Pause';
       case 'tracks': return 'Audio & subtitles';
       case 'settings': return 'Playback settings';

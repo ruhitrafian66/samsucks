@@ -14,4 +14,4 @@ export const next = '<svg viewBox="0 0 24 24"><rect fill="currentColor" x="16.4"
 const JUMP_ARC = '<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M4 12.5a8 8 0 1 0 2.4-5.7M4 4.5V9h4.5"/>';
 const jumpText = n => '<text x="12" y="15.4" text-anchor="middle" font-family="Inter, sans-serif" font-size="7" font-weight="700" fill="currentColor">' + n + '</text>';
 export const back10 = '<svg viewBox="0 0 24 24">' + JUMP_ARC + jumpText(10) + '</svg>';
-export const forward30 = '<svg viewBox="0 0 24 24"><g transform="translate(24 0) scale(-1 1)">' + JUMP_ARC + '</g>' + jumpText(30) + '</svg>';
+export const forward10 = '<svg viewBox="0 0 24 24"><g transform="translate(24 0) scale(-1 1)">' + JUMP_ARC + '</g>' + jumpText(10) + '</svg>';
