@@ -311,18 +311,20 @@ html.fast .row-track, html.fast .rows-track, html.fast .grid-track, html.fast .r
 .osd-title { font: 700 64px/1 var(--display); }
 .osd-sub { margin-top: 12px; font: 500 28px var(--body); color: var(--dim); }
 .osd-bottom {
-  position: absolute; bottom: 0; left: 0; width: 1920px; height: 320px;
-  background: linear-gradient(0deg, rgba(0, 0, 0, 0.85), transparent);
+  position: absolute; bottom: 0; left: 0; width: 1920px; height: 400px;
+  background: linear-gradient(0deg, rgba(0, 0, 0, 0.9), transparent);
 }
-.osd-bar { position: absolute; left: 96px; width: 1728px; bottom: 150px; height: 8px; border-radius: 4px; background: rgba(255, 247, 230, 0.25); }
+.osd-bar { position: absolute; left: 96px; width: 1728px; bottom: 222px; height: 8px; border-radius: 4px; background: rgba(255, 247, 230, 0.25); }
 .osd-fill {
   position: absolute; top: 0; left: 0; width: 100%; height: 100%;
   border-radius: 4px; background: var(--coral); transform-origin: 0 0; will-change: transform;
 }
+/* The knob only shows while the seek bar (not a button) has focus. */
 .osd-knob {
   position: absolute; left: -12px; top: -8px; width: 24px; height: 24px; border-radius: 12px;
-  background: var(--cream); box-shadow: 0 2px 10px rgba(0, 0, 0, 0.5); will-change: transform;
+  background: var(--cream); box-shadow: 0 2px 10px rgba(0, 0, 0, 0.5); will-change: transform; opacity: 0;
 }
+.bar-focus .osd-knob, .seeking .osd-knob { opacity: 1; }
 .osd-seek {
   display: none; position: absolute; bottom: 40px; left: 12px;
   transform: translateX(-50%); padding: 8px 16px; border-radius: 10px;
@@ -330,19 +332,27 @@ html.fast .row-track, html.fast .rows-track, html.fast .grid-track, html.fast .r
 }
 .seeking .osd-seek { display: block; }
 .osd-times {
-  position: absolute; left: 96px; width: 1728px; bottom: 90px;
+  position: absolute; left: 96px; width: 1728px; bottom: 166px;
   display: flex; justify-content: space-between; font: 500 26px var(--body);
 }
 .osd-info { color: var(--dim); }
-.osd-hint { position: absolute; left: 96px; bottom: 40px; font: 500 20px var(--body); color: var(--dim); }
-
-.pause-big {
-  position: absolute; left: 880px; top: 380px; width: 160px; height: 160px; padding: 36px;
-  border-radius: 80px; background: rgba(11, 13, 18, 0.6); color: var(--cream);
-  opacity: 0; transition: opacity 200ms ease; will-change: opacity;
+/* Names the focused button, left of the transport row. */
+.osd-hint {
+  position: absolute; left: 96px; bottom: 76px; width: 560px; font: 500 22px var(--body); color: var(--dim);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.pause-big svg { width: 88px; height: 88px; display: block; }
-.paused .pause-big { opacity: 1; }
+.osd-controls { position: absolute; left: 0; bottom: 44px; width: 1920px; height: 96px; }
+.osd-transport { position: absolute; left: 660px; width: 600px; top: 0; height: 96px; display: flex; justify-content: center; align-items: center; }
+.osd-extras { position: absolute; right: 86px; top: 0; height: 96px; display: flex; align-items: center; }
+.osd-btn {
+  width: 80px; height: 80px; margin: 0 10px; padding: 20px; border-radius: 40px; color: var(--cream);
+  transition: transform 120ms var(--ease); will-change: transform;
+}
+.osd-btn svg { width: 40px; height: 40px; display: block; }
+.osd-btn-play { width: 96px; height: 96px; padding: 24px; border-radius: 48px; background: rgba(255, 247, 230, 0.14); }
+.osd-btn-play svg { width: 48px; height: 48px; }
+.osd-btn.disabled { opacity: 0.28; }
+.osd-btn.focus { background: var(--cream); color: var(--bg); transform: scale(1.12); }
 
 .spinner {
   display: none; position: absolute; left: 912px; top: 492px; width: 96px; height: 96px;
@@ -358,7 +368,7 @@ html.fast .row-track, html.fast .rows-track, html.fast .grid-track, html.fast .r
   font: 600 46px/1.25 var(--body); color: #fff;
   text-shadow: 0 2px 6px #000, 0 0 3px #000, 0 0 3px #000;
 }
-.osd-on .subs { bottom: 340px; }
+.osd-on .subs { bottom: 410px; }
 /* Above the track panel, so a subtitle delay or size change can be judged while it's open. */
 .player .subs { z-index: 2; }
 .subs-small .subs { font-size: 34px; }
@@ -400,15 +410,33 @@ html.fast .row-track, html.fast .rows-track, html.fast .grid-track, html.fast .r
   border-radius: 38px; background: var(--cream); color: var(--bg);
   font: 700 28px/76px var(--body); box-shadow: 0 10px 40px rgba(0, 0, 0, 0.55);
 }
-.osd-on .skip { bottom: 340px; }
+.osd-on .skip { bottom: 300px; }
 
-.upnext {
-  position: absolute; right: 96px; bottom: 120px; width: 660px; padding: 34px 40px;
-  border-radius: 22px; background: var(--raised); box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);
-}
+/* Post-play: full screen, the next episode's card along the bottom. */
+.upnext { position: absolute; top: 0; left: 0; width: 1920px; height: 1080px; background: #000; z-index: 3; }
+.upnext-art { position: absolute; top: 0; left: 0; width: 1920px; height: 1080px; opacity: 0.45; }
+.upnext-shade { position: absolute; top: 0; left: 0; width: 1920px; height: 1080px; background: linear-gradient(0deg, rgba(0, 0, 0, 0.95) 25%, rgba(0, 0, 0, 0.2)); }
+.upnext-card { position: absolute; left: 96px; bottom: 96px; width: 1728px; height: 315px; }
+.upnext-thumb { position: absolute; left: 0; top: 0; width: 560px; height: 315px; border-radius: 16px; overflow: hidden; background: var(--raised); }
+.upnext-thumb img { width: 560px; height: 315px; display: block; }
+.upnext-bar { display: none; position: absolute; left: 0; bottom: 0; width: 560px; height: 8px; background: rgba(255, 247, 230, 0.25); }
+.counting .upnext-bar { display: block; }
+.upnext-fill { width: 100%; height: 100%; background: var(--coral); transform-origin: 0 0; transform: scaleX(0); transition: transform 1s linear; will-change: transform; }
+.upnext-body { position: absolute; left: 608px; top: 0; width: 1120px; height: 315px; }
 .upnext-label { font: 700 22px var(--body); color: var(--coral); letter-spacing: 0.08em; text-transform: uppercase; }
-.upnext-title { margin: 12px 0; font: 600 42px/1.1 var(--display); }
-.upnext-hint { font: 500 20px var(--body); color: var(--dim); }
+.upnext-show { margin-top: 10px; font: 500 26px var(--body); color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.upnext-title { margin-top: 6px; font: 700 52px/1.1 var(--display); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.upnext-summary {
+  margin-top: 12px; height: 66px; overflow: hidden; font: 400 22px/33px var(--body); color: var(--dim);
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+}
+.upnext-buttons { position: absolute; left: 0; bottom: 0; display: flex; }
+.upnext-btn {
+  display: flex; align-items: center; height: 72px; padding: 0 36px; margin-right: 20px; border-radius: 36px;
+  background: rgba(255, 247, 230, 0.14); font: 600 26px var(--body); color: var(--cream);
+}
+.upnext-btn svg { width: 28px; height: 28px; margin-right: 12px; }
+.upnext-btn.focus { background: var(--cream); color: var(--bg); }
 
 .player-error {
   position: absolute; left: 360px; right: 360px; top: 470px; padding: 40px;

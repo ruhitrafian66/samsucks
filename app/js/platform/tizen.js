@@ -10,6 +10,7 @@ const KEYMAP = {
   10009: 'back', 8: 'back', 27: 'back',
   10252: 'playpause', 32: 'playpause', 415: 'play', 19: 'pause', 413: 'stop',
   417: 'ff', 412: 'rw', 427: 'pageup', 428: 'pagedown', 33: 'pageup', 34: 'pagedown',
+  10232: 'prev', 10233: 'next',
   403: 'red', 404: 'green', 405: 'yellow', 406: 'blue', 457: 'info', 10073: 'info',
 };
 
@@ -21,7 +22,7 @@ export function registerKeys() {
   if (!isTizen) return;
   const keys = ['MediaPlayPause', 'MediaPlay', 'MediaPause', 'MediaStop', 'MediaFastForward',
     'MediaRewind', 'ChannelUp', 'ChannelDown', 'ColorF0Red', 'ColorF1Green', 'ColorF2Yellow',
-    'ColorF3Blue', 'Info'];
+    'ColorF3Blue', 'Info', 'MediaTrackPrevious', 'MediaTrackNext'];
   for (const k of keys) {
     try { tizen.tvinputdevice.registerKey(k); } catch (e) { warn('registerKey failed', k); }
   }

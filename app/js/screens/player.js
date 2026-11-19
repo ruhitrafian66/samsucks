@@ -25,6 +25,12 @@ const DIRECT = {
 const TEXT_SUBS = { srt: 1, subrip: 1, ass: 1, ssa: 1, mov_text: 1, vtt: 1, webvtt: 1, smi: 1 };
 
 const OSD_HIDE_MS = 4000;
+const CONTROLS_HIDE_MS = 8000; // longer while a control button has focus
+const JUMP_BACK_MS = 10000;
+const JUMP_FWD_MS = 30000;
+const UPNEXT_SECONDS = 10;
+// The button row under the seek bar, left to right.
+const CONTROLS = ['prev', 'back', 'play', 'fwd', 'next', 'tracks', 'settings'];
 const SEEK_COMMIT_MS = 900;
 const TIMELINE_MS = 10000;
 const SKIP_SHOW_MS = 10000;   // how long "Skip Intro" stays up on its own
@@ -132,8 +138,6 @@ export function PlayerScreen(initial, { offset = null } = {}) {
   const stage = h('div', 'player-stage', el);
   const subs = h('div', 'subs', el);
   const spinner = h('div', 'spinner', el);
-  const pauseBig = h('div', 'pause-big', el);
-  pauseBig.innerHTML = icons.pause;
 
   const osd = h('div', 'osd', el);
   const osdTop = h('div', 'osd-top', osd);
@@ -149,7 +153,15 @@ export function PlayerScreen(initial, { offset = null } = {}) {
   const tInfo = h('span', 'osd-info', times);
   const tLeft = h('span', 'osd-left', times);
   const hintEl = h('div', 'osd-hint', osdBottom);
-  hintEl.innerHTML = '▼ Audio, subtitles &amp; playback';
+  const controls = h('div', 'osd-controls', osdBottom);
+  const transport = h('div', 'osd-transport', controls);
+  const extras = h('div', 'osd-extras', controls);
+  const btn = {};
+  [['prev', icons.previous], ['back', icons.back10], ['play', icons.pause], ['fwd', icons.forward30], ['next', icons.next],
+    ['tracks', icons.subtitles], ['settings', icons.gear]].forEach(([id, icon], i) => {
+    btn[id] = h('div', 'osd-btn osd-btn-' + id, i < 5 ? transport : extras);
+    btn[id].innerHTML = icon;
+  });
 
   const panel = h('div', 'tracks hidden', el);
   const skipEl = h('div', 'skip hidden', el);
@@ -178,7 +190,12 @@ export function PlayerScreen(initial, { offset = null } = {}) {
   let subTimer = 0;
   let lastText = 0;
   let upnextTimer = 0;
+  let upnextFocus = 0;      // 0 = Play now, 1 = Cancel
   let nextItem = null;
+  let prevItem = null;
+  let neighbours = null;    // promise: resolves once prevItem/nextItem are known
+  let ended = false;
+  let ctrl = -1;            // focused control button (index into CONTROLS); -1 = the seek bar
   let cueTrack = null;
   let cueTimer = 0;
   let cueFor = null;
@@ -229,14 +246,84 @@ export function PlayerScreen(initial, { offset = null } = {}) {
   function showOsd(sticky) {
     toggleClass(el, 'osd-on', true);
     clearTimeout(osdTimer);
-    if (!sticky && !paused) osdTimer = setTimeout(hideOsd, OSD_HIDE_MS);
+    if (!sticky && !paused) osdTimer = setTimeout(hideOsd, ctrl >= 0 ? CONTROLS_HIDE_MS : OSD_HIDE_MS);
+    renderControls();
     renderSkip();
   }
 
   function hideOsd() {
     clearTimeout(osdTimer);
     toggleClass(el, 'osd-on', false);
+    ctrl = -1;
+    renderControls();
     renderSkip();
+  }
+
+  // --- Control buttons --------------------------------------------------
+
+  function controlEnabled(id) {
+    if (id === 'prev') return !!prevItem;
+    if (id === 'next') return !!nextItem;
+    if (id === 'tracks' || id === 'settings') return !!part;
+    return started;
+  }
+
+  function controlHint(id) {
+    const ep = e => episodeLabel(e) + '   ' + e.title;
+    switch (id) {
+      case 'prev': return 'Previous episode' + (prevItem ? '  ·  ' + ep(prevItem) : '');
+      case 'next': return 'Next episode' + (nextItem ? '  ·  ' + ep(nextItem) : '');
+      case 'back': return 'Back 10 seconds';
+      case 'fwd': return 'Forward 30 seconds';
+      case 'play': return paused ? 'Play' : 'Pause';
+      case 'tracks': return 'Audio & subtitles';
+      case 'settings': return 'Playback settings';
+    }
+    return '';
+  }
+
+  function renderControls() {
+    const episode = item.type === 'episode';
+    if (ctrl >= 0 && !controlEnabled(CONTROLS[ctrl])) ctrl = CONTROLS.indexOf('play');
+    CONTROLS.forEach((id, i) => {
+      toggleClass(btn[id], 'focus', i === ctrl);
+      toggleClass(btn[id], 'disabled', !controlEnabled(id));
+    });
+    // Films have no neighbours: leave the two buttons out rather than permanently greyed.
+    toggleClass(btn.prev, 'hidden', !episode);
+    toggleClass(btn.next, 'hidden', !episode);
+    const icon = paused ? icons.play : icons.pause;
+    if (btn.play._icon !== icon) { btn.play._icon = icon; btn.play.innerHTML = icon; }
+    toggleClass(el, 'bar-focus', ctrl < 0);
+    setText(hintEl, ctrl >= 0 ? controlHint(CONTROLS[ctrl]) : '▼ Controls');
+  }
+
+  function moveControl(dir) {
+    for (let i = ctrl + dir; i >= 0 && i < CONTROLS.length; i += dir) {
+      const id = CONTROLS[i];
+      if (controlEnabled(id) && !btn[id].classList.contains('hidden')) { ctrl = i; break; }
+    }
+    showOsd();
+  }
+
+  function activateControl(id) {
+    if (!controlEnabled(id)) return;
+    switch (id) {
+      case 'prev': jumpTo(prevItem); break;
+      case 'next': jumpTo(nextItem); break;
+      case 'back': seekTo(-JUMP_BACK_MS); break;
+      case 'fwd': seekTo(JUMP_FWD_MS); break;
+      case 'play': if (seekTarget != null) commitSeek(); else togglePause(); break;
+      case 'tracks': openPanel(0); break;
+      case 'settings': openPanel(2); break;
+    }
+  }
+
+  // Leave this episode for another one; teardown reports where this one stopped.
+  function jumpTo(target) {
+    if (!target) return;
+    clearInterval(upnextTimer);
+    router.replace(PlayerScreen(target, { offset: 0 }));
   }
 
   // --- Skip intro / credits ---------------------------------------------
@@ -244,7 +331,7 @@ export function PlayerScreen(initial, { offset = null } = {}) {
   // The button shows for a few seconds when a marker starts, and again whenever the
   // controls are up inside it. While it shows, OK skips.
   function skipVisible() {
-    return !!marker && !paused && seekTarget == null && panel.classList.contains('hidden') &&
+    return !!marker && !paused && seekTarget == null && ctrl < 0 && panel.classList.contains('hidden') &&
       (Date.now() - markerAt < SKIP_SHOW_MS || el.classList.contains('osd-on'));
   }
 
@@ -378,6 +465,7 @@ export function PlayerScreen(initial, { offset = null } = {}) {
     log('playing after ' + (Date.now() - t0) + 'ms (' + mode + ')');
     report('playing');
     startTimeline();
+    renderControls();
   }
 
   // Map Plex's chosen streams onto AVPlay's track list (same file order).
@@ -437,6 +525,7 @@ export function PlayerScreen(initial, { offset = null } = {}) {
       subStream = streamsOf(part, 3).find(s => s.selected) || null;
       markers = (item.Marker || []).filter(m => MARKER_LABEL[m.type] && m.endTimeOffset > m.startTimeOffset);
       renderTitles();
+      if (item.type === 'episode') neighbours = loadNeighbours();
       mode = decideMode();
       if (offset == null) offset = item.viewOffset || 0;
       position = offset;
@@ -462,7 +551,7 @@ export function PlayerScreen(initial, { offset = null } = {}) {
     toggleClass(spinner, 'on', false);
     errorEl.classList.remove('hidden');
     setText(errorEl, 'Playback failed: ' + msg + (fileOpts.mode === 'auto' ? ''
-      : '\n' + (fileOpts.mode === 'direct' ? 'Direct play' : 'Convert') + ' is forced for this file. Press ▼ and choose Auto under Playback.'));
+      : '\n' + (fileOpts.mode === 'direct' ? 'Direct play' : 'Convert') + ' is forced for this file. Press ▼ twice and choose Auto under Playback.'));
   }
 
   // --- Controls ---------------------------------------------------------
@@ -479,17 +568,23 @@ export function PlayerScreen(initial, { offset = null } = {}) {
       showOsd(true);
     }
     toggleClass(el, 'paused', paused);
+    renderControls();
     report(paused ? 'paused' : 'playing');
   }
 
+  // Left/right on the seek bar: steps grow while the key is held.
   function seekBy(dir) {
-    if (!started) return;
     const now = Date.now();
     seekCount = now - lastSeekAt < 700 ? seekCount + 1 : 0;
     lastSeekAt = now;
     const step = seekCount < 3 ? 10000 : seekCount < 8 ? 30000 : seekCount < 16 ? 60000 : 180000;
+    seekTo(dir * step);
+  }
+
+  function seekTo(delta) {
+    if (!started) return;
     const from = seekTarget == null ? position : seekTarget;
-    seekTarget = Math.max(0, Math.min(duration - 3000, from + dir * step));
+    seekTarget = Math.max(0, Math.min(duration - 3000, from + delta));
     toggleClass(el, 'seeking', true);
     setText(seekLabel, clock(seekTarget));
     renderProgress(seekTarget);
@@ -530,7 +625,7 @@ export function PlayerScreen(initial, { offset = null } = {}) {
   // Online subtitle search: results come from the server's subtitle agent.
   const search = { results: [], index: 0, status: '', busy: false, generation: 0 };
 
-  function openPanel() {
+  function openPanel(col) {
     const audios = streamsOf(part, 2);
     const texts = streamsOf(part, 3);
     panelLists = [
@@ -541,7 +636,7 @@ export function PlayerScreen(initial, { offset = null } = {}) {
       playbackOptions(),
     ];
     panelIndex = panelLists.map(l => Math.max(0, l.findIndex(x => x.on)));
-    panelCol = 0;
+    panelCol = col || 0;
     panelMode = 'tracks';
     renderPanel();
     panel.classList.remove('hidden');
@@ -788,45 +883,114 @@ export function PlayerScreen(initial, { offset = null } = {}) {
 
   // --- Ending -----------------------------------------------------------
 
-  async function nextEpisode() {
+  // The episodes either side of this one, crossing season boundaries.
+  async function loadNeighbours() {
     const server = session.server;
-    const eps = await server.children(item.parentRatingKey);
-    const i = eps.findIndex(e => e.ratingKey === item.ratingKey);
-    if (i >= 0 && i < eps.length - 1) return eps[i + 1];
-    const seasons = (await server.children(item.grandparentRatingKey)).filter(s => s.type === 'season');
-    const si = seasons.findIndex(s => s.ratingKey === item.parentRatingKey);
-    if (si >= 0 && si < seasons.length - 1) return (await server.children(seasons[si + 1].ratingKey))[0] || null;
-    return null;
+    const playing = item;
+    let prev = null;
+    let next = null;
+    try {
+      const eps = await server.children(playing.parentRatingKey);
+      const i = eps.findIndex(e => e.ratingKey === playing.ratingKey);
+      if (i > 0) prev = eps[i - 1];
+      if (i >= 0 && i < eps.length - 1) next = eps[i + 1];
+      if (!prev || !next) {
+        const seasons = (await server.children(playing.grandparentRatingKey)).filter(s => s.type === 'season');
+        const si = seasons.findIndex(s => s.ratingKey === playing.parentRatingKey);
+        if (!next && si >= 0 && si < seasons.length - 1) next = (await server.children(seasons[si + 1].ratingKey))[0] || null;
+        if (!prev && si > 0) prev = (await server.children(seasons[si - 1].ratingKey)).pop() || null;
+      }
+    } catch (e) {
+      warn('could not load neighbouring episodes', e.message);
+    }
+    if (!alive) return;
+    prevItem = prev;
+    nextItem = next;
+    renderControls();
   }
 
   async function finished() {
+    if (ended) return;
+    ended = true;
     position = duration;
     report('stopped');
     clearInterval(timelineTimer);
     player.close();
-    if (item.type !== 'episode' || !store.get('autoplayNext', true)) { exit(); return; }
-    try { nextItem = await nextEpisode(); } catch (e) { nextItem = null; }
+    started = false;
+    closePanel();
+    hideOsd();
+    setText(subs, '');
+    toggleClass(spinner, 'on', false);
+    if (item.type !== 'episode') { exit(); return; }
+    await neighbours;
     if (!alive) return;
     if (!nextItem) { exit(); return; }
-    let left = 10;
-    upnext.classList.remove('hidden');
-    const render = () => {
-      upnext.innerHTML = '';
-      h('div', 'upnext-label', upnext).textContent = 'Up next in ' + left;
-      h('div', 'upnext-title', upnext).textContent = episodeLabel(nextItem) + '   ' + nextItem.title;
-      h('div', 'upnext-hint', upnext).textContent = 'OK to play now · Back to stop';
+    showUpNext();
+  }
+
+  // Post-play screen: what's next, with a countdown when autoplay is on.
+  function showUpNext() {
+    const server = session.server;
+    const auto = store.get('autoplayNext', true);
+    let left = UPNEXT_SECONDS;
+    upnext.innerHTML = '';
+    const art = nextItem.art || nextItem.grandparentArt || item.art || item.grandparentArt;
+    if (art) h('img', 'upnext-art', upnext).src = server.image(art, 960, 540);
+    h('div', 'upnext-shade', upnext);
+    const card = h('div', 'upnext-card', upnext);
+    const thumb = h('div', 'upnext-thumb', card);
+    if (nextItem.thumb) h('img', '', thumb).src = server.image(nextItem.thumb, 560, 315);
+    const fill = h('div', 'upnext-fill', h('div', 'upnext-bar', thumb));
+    const body = h('div', 'upnext-body', card);
+    const label = h('div', 'upnext-label', body);
+    h('div', 'upnext-show', body).textContent = nextItem.grandparentTitle || item.grandparentTitle || '';
+    h('div', 'upnext-title', body).textContent = episodeLabel(nextItem) + '   ' + nextItem.title;
+    h('div', 'upnext-summary', body).textContent = nextItem.summary || '';
+    const buttons = h('div', 'upnext-buttons', body);
+    const playBtn = h('div', 'upnext-btn', buttons);
+    playBtn.innerHTML = icons.play;
+    h('span', '', playBtn).textContent = 'Play now';
+    const cancelBtn = h('div', 'upnext-btn', buttons);
+    cancelBtn.textContent = 'Cancel';
+    upnextFocus = 0;
+    upnext._render = () => {
+      setText(label, upnextTimer ? 'Up next in ' + left : 'Up next');
+      toggleClass(playBtn, 'focus', upnextFocus === 0);
+      toggleClass(cancelBtn, 'focus', upnextFocus === 1);
+      toggleClass(thumb, 'counting', !!upnextTimer);
     };
-    render();
-    upnextTimer = setInterval(() => {
-      left--;
-      if (left <= 0) playNext();
-      else render();
-    }, 1000);
+    upnext.classList.remove('hidden');
+    if (auto) {
+      upnextTimer = setInterval(() => {
+        left--;
+        if (left <= 0) { playNext(); return; }
+        setTransform(fill, 'scaleX(' + (1 - (left - 1) / UPNEXT_SECONDS).toFixed(3) + ')');
+        upnext._render();
+      }, 1000);
+      // Next frame, so the first second animates too.
+      setTimeout(() => setTransform(fill, 'scaleX(' + (1 / UPNEXT_SECONDS).toFixed(3) + ')'), 50);
+    }
+    upnext._render();
+  }
+
+  function upnextKey(action) {
+    if (action === 'back' || action === 'stop') { exit(); return; }
+    if (action === 'play' || action === 'playpause' || action === 'next' || action === 'pageup') { playNext(); return; }
+    if (action === 'enter') {
+      if (upnextFocus === 0) playNext(); else exit();
+      return;
+    }
+    if (action === 'left' || action === 'right') {
+      // Moving off "Play now" means the viewer is deciding: stop counting down.
+      upnextFocus = action === 'right' ? 1 : 0;
+      clearInterval(upnextTimer);
+      upnextTimer = 0;
+      upnext._render();
+    }
   }
 
   function playNext() {
-    clearInterval(upnextTimer);
-    router.replace(PlayerScreen(nextItem, { offset: 0 }));
+    jumpTo(nextItem);
   }
 
   function exit() {
@@ -868,30 +1032,44 @@ export function PlayerScreen(initial, { offset = null } = {}) {
       if (!started) start();
     },
     onKey(action) {
-      if (!upnext.classList.contains('hidden')) {
-        if (action === 'enter') { playNext(); return true; }
-        if (action === 'back' || action === 'stop') { exit(); return true; }
+      if (ended) {
+        if (!upnext.classList.contains('hidden')) upnextKey(action);
+        else if (action === 'back' || action === 'stop') exit();
         return true;
       }
       if (!panel.classList.contains('hidden')) return panelKey(action);
+      const osdOn = el.classList.contains('osd-on');
+      const onButtons = osdOn && ctrl >= 0;
       switch (action) {
         case 'enter':
-          if (seekTarget != null) commitSeek();
+          if (onButtons) activateControl(CONTROLS[ctrl]);
+          else if (seekTarget != null) commitSeek();
           else if (skipVisible()) skipMarker();
-          else if (el.classList.contains('osd-on') || paused) togglePause();
+          else if (osdOn || paused) togglePause();
           else showOsd();
           return true;
         case 'playpause': if (seekTarget != null) commitSeek(); else togglePause(); return true;
         case 'play': if (paused) togglePause(); return true;
         case 'pause': if (!paused) togglePause(); return true;
-        case 'left': case 'rw': seekBy(-1); return true;
-        case 'right': case 'ff': seekBy(1); return true;
-        case 'up': case 'info': showOsd(); return true;
-        case 'down': if (part) openPanel(); return true;
+        case 'left': if (onButtons) moveControl(-1); else seekBy(-1); return true;
+        case 'right': if (onButtons) moveControl(1); else seekBy(1); return true;
+        case 'rw': seekBy(-1); return true;
+        case 'ff': seekBy(1); return true;
+        case 'up': ctrl = -1; showOsd(); return true;
+        case 'info': showOsd(); return true;
+        case 'down':
+          // First press shows the controls with the button row focused; from there, the track panel.
+          if (onButtons) { if (part) openPanel(0); return true; }
+          ctrl = CONTROLS.indexOf('play');
+          showOsd();
+          return true;
+        case 'next': case 'pageup': jumpTo(nextItem); return true;
+        case 'prev': case 'pagedown': jumpTo(prevItem); return true;
         case 'stop': exit(); return true;
         case 'back':
-          if (seekTarget != null) { seekTarget = null; toggleClass(el, 'seeking', false); renderProgress(position); showOsd(); return true; }
-          if (el.classList.contains('osd-on') && !paused) { hideOsd(); return true; }
+          if (seekTarget != null) { seekTarget = null; clearTimeout(seekTimer); toggleClass(el, 'seeking', false); renderProgress(position); showOsd(); return true; }
+          if (onButtons && paused) { ctrl = -1; showOsd(true); return true; }
+          if (osdOn && !paused) { hideOsd(); return true; }
           exit();
           return true;
       }
