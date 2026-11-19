@@ -5,6 +5,7 @@ import { load } from './images.js';
 import { session } from '../session.js';
 import { progress, episodeLabel } from '../util/format.js';
 
+// Frame sizes: what rows and grids lay their tiles out by.
 export const KINDS = {
   poster: { w: 220, h: 330 },
   wide: { w: 400, h: 225 },
@@ -12,6 +13,13 @@ export const KINDS = {
   episode: { w: 384, h: 216 },
   person: { w: 200, h: 200 },
 };
+
+// The size requested from the server goes by the picture's shape, not by the frame: a poster
+// is the same picture in a row (220 wide) and in the library grid (216 wide), and asking for
+// both sizes makes the server convert it twice and the TV download and cache it twice.
+const POSTER = { w: 220, h: 330 };
+const STILL = { w: 400, h: 225 };
+const REQUEST = { poster: POSTER, grid: POSTER, wide: STILL, episode: STILL, person: { w: 200, h: 200 } };
 
 export function createTile(kind, { caption = false } = {}) {
   const size = KINDS[kind];
@@ -46,6 +54,15 @@ function artFor(item, kind) {
   return item.thumb;
 }
 
+// The URL a tile of this kind loads for an item. Anything that warms the image cache ahead
+// of a tile must use it too, or it fetches a picture no tile will ask for.
+export function tileImage(item, kind) {
+  const server = session.server;
+  if (!server) return '';
+  const size = REQUEST[kind];
+  return server.image(artFor(item, kind), size.w, size.h);
+}
+
 function titleFor(item, kind) {
   if (item.type === 'episode' && kind !== 'episode') return item.grandparentTitle || item.title;
   return item.title;
@@ -73,10 +90,9 @@ export function fillTile(tile, item) {
     return;
   }
   const kind = tile.kind;
-  const server = session.server;
-  const path = artFor(item, kind);
-  // The web layer is 1920x1080, so tile size is exactly the pixels we need.
-  load(tile.img, server ? server.image(path, tile.size.w, tile.size.h) : '');
+  // The web layer is 1920x1080, so the picture is asked for at about the pixels it covers:
+  // one size per shape (see REQUEST), which the <img> scales to its frame (object-fit: cover).
+  load(tile.img, tileImage(item, kind));
   setText(tile.ph, titleFor(item, kind));
 
   const p = progress(item);

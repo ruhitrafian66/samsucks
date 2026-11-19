@@ -6,6 +6,7 @@ import { Grid } from '../ui/grid.js';
 import { useAmbience } from '../ui/backdrop.js';
 import { session } from '../session.js';
 import { prefetch } from '../ui/images.js';
+import { tileImage } from '../ui/tile.js';
 import { isFast } from '../input.js';
 import { openItem, playItem } from '../nav.js';
 import { error } from '../util/log.js';
@@ -46,15 +47,18 @@ export function LibraryScreen(section, { filters = null } = {}) {
     return f;
   }
 
-  const grid = new Grid({
+  // Declared before it is built: Grid renders once inside its constructor, and that render
+  // calls onNeed while `grid` is still unset.
+  let grid = null;
+  grid = new Grid({
     top: 200, height: 880, total: 0,
     getItem: i => items[i],
     onFocus: (item, index) => {
-      // Warm posters for the row just past the recycled pool.
+      // Warm posters for the row just past the recycled pool, with the URL its tiles will ask for.
       if (!isFast()) {
         const start = (Math.floor(index / grid.cols) + grid.poolRows - 1) * grid.cols;
         for (let i = start; i < start + grid.cols; i++) {
-          if (items[i]) prefetch(session.server.image(items[i].thumb, 216, 324));
+          if (items[i]) prefetch(tileImage(items[i], 'grid'));
         }
       }
       if (!item) { setText(focusInfo, ''); return; }
@@ -63,6 +67,7 @@ export function LibraryScreen(section, { filters = null } = {}) {
     },
     onSelect: item => openItem(item),
     onNeed: (start, end) => {
+      if (!grid) return; // the constructor's render: reload() below asks for the first page
       for (let p = Math.floor(start / PAGE); p <= Math.floor(end / PAGE); p++) loadPage(p);
     },
   });

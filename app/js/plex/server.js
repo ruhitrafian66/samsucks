@@ -48,7 +48,14 @@ export class Server {
   }
 
   async hubs() {
-    const mc = await this.get('/hubs', { count: 24, includeExternalMedia: 0 });
+    // Home shows attributes, Image (clear logos) and UltraBlurColors only. The child elements
+    // left out here were three quarters of the response (84 KB down to 21 KB). The player and
+    // the detail screen load the item's own metadata; a detail page opened from Home fills
+    // its genre/cast and file lines from that, a moment after the rest.
+    const mc = await this.get('/hubs', {
+      count: 24, includeExternalMedia: 0,
+      excludeElements: 'Media,Role,Director,Writer,Genre,Country,Collection',
+    });
     return (mc.Hub || []).filter(h => h.size > 0 && SUPPORTED_HUB_TYPES[h.type] && h.Metadata);
   }
 
@@ -75,9 +82,12 @@ export class Server {
     return item;
   }
 
-  async children(ratingKey) {
-    const mc = await this.get('/library/metadata/' + ratingKey + '/children', { excludeAllLeaves: 1 });
-    return mc.Metadata || [];
+  // maxAge (ms): reuse an answer this recent instead of asking again; 0 always asks.
+  async children(ratingKey, { maxAge = 0 } = {}) {
+    const mc = await this.get('/library/metadata/' + ratingKey + '/children', { excludeAllLeaves: 1 }, { maxAge });
+    // A copy: with maxAge every caller would otherwise get the one cached list, and a caller
+    // that pops from or sorts its list would change it for the next.
+    return (mc.Metadata || []).slice();
   }
 
   // "More like this" and similar rows for a movie or show.

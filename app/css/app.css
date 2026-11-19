@@ -267,7 +267,9 @@ html.fast .row-track, html.fast .rows-track, html.fast .grid-track, html.fast .r
 .detail-title { font: 700 108px/0.95 var(--display); max-width: 1150px; }
 .detail-sub { margin-top: 18px; font: 600 30px var(--body); min-height: 36px; }
 .detail-meta { margin-top: 12px; font: 500 26px var(--body); color: var(--dim); }
-.detail-tags { margin-top: 10px; font: 400 22px var(--body); color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 1100px; }
+/* Fixed height, like .detail-tech: the line is filled after the title (a page opened from Home
+   gets it with the item's own metadata), and the lines below must not move when it is. */
+.detail-tags { margin-top: 10px; height: 27px; font: 400 22px/27px var(--body); color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 1100px; }
 .detail-summary {
   margin-top: 22px; max-width: 980px; height: 156px;
   font: 400 26px/1.5 var(--body); color: rgba(255, 247, 230, 0.82);
