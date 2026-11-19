@@ -1,6 +1,5 @@
 // Sign in with a plex.tv/link code (or by scanning the QR code with a phone),
 // then pick a server.
-import qrcode from '../vendor/qrcode.js';
 import { h, setText } from '../util/dom.js';
 import { createPin, checkPin, authAppUrl, getUser, getServers, connect } from '../plex/auth.js';
 import { signIn, useServer, session } from '../session.js';
@@ -27,6 +26,22 @@ export function LoginScreen({ onDone }) {
 
   let timer = 0;
   let alive = true;
+  let qrFor = null;   // the code the QR box shows, or is about to
+
+  // The QR generator is 49 KB that only this screen uses, so it is loaded here, when a code
+  // is drawn, and not at every app start. The code is already on screen and does not wait
+  // for it; if the generator can't be loaded the box stays empty.
+  function drawQr(pinCode) {
+    qrFor = pinCode;
+    qrBox.innerHTML = '';
+    import('../vendor/qrcode.js').then(({ default: qrcode }) => {
+      if (qrFor !== pinCode || !alive) return; // a newer code replaced this one
+      const qr = qrcode(0, 'M');
+      qr.addData(authAppUrl(pinCode));
+      qr.make();
+      qrBox.innerHTML = qr.createSvgTag({ cellSize: 6, margin: 0, scalable: true });
+    }).catch(e => error('QR code failed', e));
+  }
 
   async function start() {
     clearTimeout(timer);
@@ -35,10 +50,7 @@ export function LoginScreen({ onDone }) {
       const pin = await createPin();
       if (!alive) return;
       setText(code, pin.code);
-      const qr = qrcode(0, 'M');
-      qr.addData(authAppUrl(pin.code));
-      qr.make();
-      qrBox.innerHTML = qr.createSvgTag({ cellSize: 6, margin: 0, scalable: true });
+      drawQr(pin.code);
       const expires = Date.now() + (pin.expiresIn || 900) * 1000 - 5000;
       const poll = async () => {
         if (!alive) return;

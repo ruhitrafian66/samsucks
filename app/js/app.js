@@ -82,9 +82,17 @@ export function boot() {
   // Dev builds only; release builds don't ship js/dev/.
   if (DEV && DEV_HOST) import('./dev/remote.js').then(m => m.startDevRemote());
   start();
+  // start() built the first screen (Home paints from its cache), so the splash only has to
+  // cover that screen's first frame: by the second rAF callback it has been drawn.
   const splash = document.getElementById('splash');
-  setTimeout(() => {
+  let hidden = false;
+  const hideSplash = () => {
+    if (hidden) return;
+    hidden = true;
     splash.classList.add('gone');
     setTimeout(() => splash.parentNode && splash.parentNode.removeChild(splash), 400);
-  }, 500);
+  };
+  requestAnimationFrame(() => requestAnimationFrame(hideSplash));
+  // rAF pauses while the page is not visible; never leave the splash up waiting for it.
+  setTimeout(hideSplash, 500);
 }

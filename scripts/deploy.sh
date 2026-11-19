@@ -39,7 +39,10 @@ fi
 # Bundle all modules into one classic script. Tizen 6.0 (2021 TVs) serves file:// with no
 # MIME type and its Chromium 76 then refuses to load ES modules, so the app hangs on the splash.
 EXTERNAL=""; [ "$DEV" = 1 ] || EXTERNAL="--external:./dev/remote.js"
-npx --yes esbuild@0.25.0 "$OUT/js/main.js" --bundle --format=iife --target=chrome76 $EXTERNAL \
+# Release builds are minified: less for the TV to read and parse at every start. Dev builds
+# are not, so console errors and stack traces from the TV keep their real names.
+MINIFY=""; [ "$DEV" = 1 ] || MINIFY="--minify"
+npx --yes esbuild@0.25.0 "$OUT/js/main.js" --bundle --format=iife --target=chrome76 $EXTERNAL $MINIFY \
   --log-level=warning --outfile="$OUT/bundle.js"
 rm -rf "$OUT/js"
 sed -i.bak 's|<script type="module" src="js/main.js"></script>|<script src="bundle.js"></script>|' "$OUT/index.html" && rm "$OUT/index.html.bak"
