@@ -8,13 +8,20 @@ const GAP = 28;
 const LEFT = 96;
 const BEHIND = 2;   // tiles kept to the left of focus (one is peeking on screen)
 
+// The position nearest to i that a list of n items has (0 for an empty list).
+function clamp(i, n) {
+  return Math.max(0, Math.min(n - 1, i));
+}
+
 export class Row {
-  constructor({ title, kind = 'poster', items = [], caption = false, onFocus, onSelect }) {
+  // index: the item to start on. A row that opens somewhere other than its first item
+  // should be given it here, so it isn't drawn (and its images fetched) at 0 first.
+  constructor({ title, kind = 'poster', items = [], index = 0, caption = false, onFocus, onSelect }) {
     this.kind = kind;
     this.size = KINDS[kind];
     this.step = this.size.w + GAP;
     this.items = items;
-    this.index = 0;
+    this.index = clamp(index, items.length);
     this.active = false;
     this.onFocus = onFocus;
     this.onSelect = onSelect;
@@ -47,9 +54,13 @@ export class Row {
     this.render();
   }
 
-  setItems(items, keepKey) {
+  // Where the row lands: on `index` when one is given, else on the item with ratingKey
+  // `keepKey`, else where it was.
+  setItems(items, keepKey, index) {
     this.items = items;
-    if (keepKey) {
+    if (index != null) {
+      this.index = clamp(index, items.length);
+    } else if (keepKey) {
       const i = items.findIndex(it => it.ratingKey === keepKey);
       this.index = i >= 0 ? i : Math.min(this.index, items.length - 1);
     } else {
@@ -74,7 +85,7 @@ export class Row {
 
   focusIndex(i) {
     if (!this.items.length) return;
-    this.index = Math.max(0, Math.min(this.items.length - 1, i));
+    this.index = clamp(i, this.items.length);
     this.render();
     if (this.onFocus) this.onFocus(this.current(), this);
   }
@@ -93,18 +104,25 @@ export class Row {
     if (this.onSelect && this.current()) this.onSelect(this.current(), this);
   }
 
+  // Put item i in its pool slot.
+  place(i) {
+    const tile = this.pool[i % this.poolSize];
+    if (tile.index !== i) {
+      tile.index = i;
+      setTransform(tile.el, 'translateX(' + i * this.step + 'px)');
+      tile.el.style.visibility = '';
+    }
+    fillTile(tile, this.items[i]);
+  }
+
   render() {
     const first = Math.max(0, this.index - BEHIND);
     const last = Math.min(this.items.length, first + this.poolSize);
-    for (let i = first; i < last; i++) {
-      const tile = this.pool[i % this.poolSize];
-      if (tile.index !== i) {
-        tile.index = i;
-        setTransform(tile.el, 'translateX(' + i * this.step + 'px)');
-        tile.el.style.visibility = '';
-      }
-      fillTile(tile, this.items[i]);
-    }
+    // Images download in the order the tiles are filled (see images.js): the focused
+    // one, then those ahead of it, then those behind.
+    const focus = Math.min(Math.max(this.index, first), last);
+    for (let i = focus; i < last; i++) this.place(i);
+    for (let i = focus - 1; i >= first; i--) this.place(i);
     // Slots not covering any item this frame.
     for (const tile of this.pool) {
       if (tile.index < first || tile.index >= last) {

@@ -155,20 +155,20 @@ export function DetailScreen(initial, { autoplay = false } = {}) {
   async function loadEpisodes(season) {
     const kids = await session.server.children(season.ratingKey);
     if (!alive) return;
+    // Land on the first unwatched episode. The row is given that position before it draws,
+    // so it never fetches thumbnails for a place it is about to leave.
+    const next = Math.max(0, kids.findIndex(k => !k.viewCount || k.viewOffset));
     if (!episodes) {
       const row = new Row({
-        kind: 'episode', caption: true, items: kids,
+        kind: 'episode', caption: true, items: kids, index: next,
         onSelect: ep => playItem(ep, { offset: ep.viewOffset || 0 }),
       });
       episodesWrap.appendChild(row.el);
       episodes = { row, items: kids };
     } else {
       episodes.items = kids;
-      episodes.row.setItems(kids);
+      episodes.row.setItems(kids, null, next);
     }
-    // Land on the first unwatched episode.
-    const next = kids.findIndex(k => !k.viewCount || k.viewOffset);
-    episodes.row.focusIndex(next >= 0 ? next : 0);
     renderFocus();
   }
 
@@ -206,17 +206,35 @@ export function DetailScreen(initial, { autoplay = false } = {}) {
     renderFocus();
   }
 
+  // Build the cast and related rows when they can first be seen. A film has them right
+  // under its buttons, on screen as the page opens. A show has its seasons and episodes
+  // there, and the rows stay below the screen until focus leaves the buttons and the body
+  // shifts up. (Focus can't leave before the details are in: the zones below are built
+  // from them.) A show with nothing else to move down to gets them at once, or they could
+  // never be reached.
+  function showExtras() {
+    if (item.type === 'show' && zone === 'buttons' && (seasons.length > 1 || episodes)) return;
+    loadExtras().catch(e => error('detail extras failed', e));
+  }
+
   async function load() {
     try {
       let key = item.ratingKey;
       let preferSeason = null;
       if (item.type === 'season') { preferSeason = item.ratingKey; key = item.parentRatingKey; }
-      const full = await session.server.metadata(key);
+      const details = session.server.metadata(key);
+      // The seasons need only the show's key. When the page opens on a show or a season
+      // that key is known before the details arrive, so both are asked for at once.
+      const early = item.type === 'show' || item.type === 'season' ? session.server.children(key) : null;
+      // It is awaited below, inside this try. Until then, and if load() stops before then,
+      // this keeps a failure from counting as an unhandled rejection.
+      if (early) early.catch(() => {});
+      const full = await details;
       if (!alive || !full) return;
       item = full;
       renderHeader();
       if (isShowLike()) {
-        seasons = (await session.server.children(item.ratingKey)).filter(s => s.type === 'season');
+        seasons = (await (early || session.server.children(item.ratingKey))).filter(s => s.type === 'season');
         if (!alive) return;
         const deckSeason = item.onDeck ? seasons.findIndex(s => s.ratingKey === item.onDeck.parentRatingKey) : -1;
         const pref = preferSeason ? seasons.findIndex(s => s.ratingKey === preferSeason) : -1;
@@ -230,7 +248,7 @@ export function DetailScreen(initial, { autoplay = false } = {}) {
         const t = target();
         if (t) playItem(t, { offset: t.viewOffset || 0 });
       }
-      loadExtras().catch(e => error('detail extras failed', e));
+      showExtras();
     } catch (e) {
       error('detail load failed', e);
       setText(summary, 'Couldn\'t load details.');
@@ -263,6 +281,7 @@ export function DetailScreen(initial, { autoplay = false } = {}) {
     if (i < 0 || i >= order.length) return;
     zone = order[i];
     renderFocus();
+    showExtras();
   }
 
   return {

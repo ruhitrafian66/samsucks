@@ -93,6 +93,25 @@ export class Grid {
     if (item && this.onSelect) this.onSelect(item, this.index);
   }
 
+  // Put grid row r in its pool slot, unless it is there already.
+  placeRow(r) {
+    const slot = this.rows[r % this.poolRows];
+    if (slot.row === r) return;
+    slot.row = r;
+    slot.el.style.visibility = '';
+    setTransform(slot.el, 'translateY(' + r * this.stepY + 'px)');
+    for (let c = 0; c < this.cols; c++) {
+      const i = r * this.cols + c;
+      const tile = slot.tiles[c];
+      if (i < this.total) {
+        tile.el.style.visibility = '';
+        fillTile(tile, this.getItem(i) || null);
+      } else {
+        tile.el.style.visibility = 'hidden';
+      }
+    }
+  }
+
   render() {
     const focusRow = Math.floor(this.index / this.cols);
     // Keep the focused row second from the top (first row at the very top).
@@ -100,23 +119,11 @@ export class Grid {
     const firstRow = Math.max(0, this.scrollRow - 1);
     const lastRow = Math.min(this.rowCount, firstRow + this.poolRows);
 
-    for (let r = firstRow; r < lastRow; r++) {
-      const slot = this.rows[r % this.poolRows];
-      if (slot.row === r) continue;
-      slot.row = r;
-      slot.el.style.visibility = '';
-      setTransform(slot.el, 'translateY(' + r * this.stepY + 'px)');
-      for (let c = 0; c < this.cols; c++) {
-        const i = r * this.cols + c;
-        const tile = slot.tiles[c];
-        if (i < this.total) {
-          tile.el.style.visibility = '';
-          fillTile(tile, this.getItem(i) || null);
-        } else {
-          tile.el.style.visibility = 'hidden';
-        }
-      }
-    }
+    // Images download in the order the tiles are filled (see images.js): the focused
+    // row, then the rows below it, then the rows above.
+    const from = Math.min(focusRow, lastRow);
+    for (let r = from; r < lastRow; r++) this.placeRow(r);
+    for (let r = from - 1; r >= firstRow; r--) this.placeRow(r);
     for (const slot of this.rows) {
       if (slot.row < firstRow || slot.row >= lastRow) {
         slot.row = -1;
