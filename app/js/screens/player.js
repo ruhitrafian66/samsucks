@@ -33,7 +33,11 @@ const UPNEXT_SECONDS = 10;
 const CONTROLS = ['prev', 'back', 'play', 'fwd', 'next', 'tracks', 'settings'];
 const SEEK_COMMIT_MS = 900;
 const TIMELINE_MS = 10000;
+const TRACK_TRIES = 20;       // time ticks to keep offering AVPlay the audio/subtitle choice
+const START_SLACK_MS = 5000;  // AVPlay starts on a keyframe near the position asked for, not on it
+const START_WAIT_MS = 10000;  // a prepare with a start position gets this long, then one try without it
 const SKIP_SHOW_MS = 10000;   // how long "Skip Intro" stays up on its own
+const TRACK_ROWS = 10;        // options a panel column shows at once; ten end above the subtitles, drawn over the panel
 const SEARCH_ROWS = 8;        // subtitle search results visible at once
 const MARKER_LABEL = { intro: 'Skip Intro', credits: 'Skip Credits', commercial: 'Skip Ad' };
 
@@ -69,6 +73,14 @@ function delayLabel(ms) {
 }
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+// The promise's own outcome, or a rejection when it takes longer than ms.
+function within(promise, ms) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('no answer in ' + ms / 1000 + ' s')), ms);
+    promise.then(v => { clearTimeout(timer); resolve(v); }, e => { clearTimeout(timer); reject(e); });
+  });
+}
 
 function streamsOf(part, type) {
   return (part && part.Stream || []).filter(s => s.streamType === type);
@@ -202,6 +214,10 @@ export function PlayerScreen(initial, { offset = null } = {}) {
   let markers = [];
   let marker = null;        // the intro/credits marker playback is inside, if any
   let markerAt = 0;
+  let trackTries = 0;       // > 0 while the audio/subtitle choice still has to reach AVPlay
+  let audioSet = false;
+  let textSet = false;
+  let opening = 0;          // counts open() calls, so one that was overtaken can tell
   const fileOpts = loadFileOpts(initial.ratingKey);
   el.classList.add('subs-' + SUB_SIZES[subSizeIndex()][0]);
   const playSession = uuid();
@@ -210,8 +226,10 @@ export function PlayerScreen(initial, { offset = null } = {}) {
     onTime(ms) {
       if (!started) return;
       position = base + ms;
-      if (seekTarget == null) renderProgress(position);
+      // Nobody sees the bar while the controls are hidden; showOsd() draws it when they appear.
+      if (seekTarget == null && el.classList.contains('osd-on')) renderProgress(position);
       checkMarker();
+      if (trackTries) tryTracks();
     },
     onBuffering(on) { toggleClass(spinner, 'on', on); },
     onEnd() { finished(); },
@@ -225,12 +243,13 @@ export function PlayerScreen(initial, { offset = null } = {}) {
 
   // --- OSD --------------------------------------------------------------
 
-  function renderProgress(ms) {
+  // textNow: also write the clock text now, instead of at most once in 900 ms.
+  function renderProgress(ms, textNow) {
     const p = duration ? Math.max(0, Math.min(1, ms / duration)) : 0;
     setTransform(barFill, 'scaleX(' + p.toFixed(4) + ')');
     setTransform(knob, 'translateX(' + Math.round(p * 1728) + 'px)');
     const now = Date.now();
-    if (now - lastText > 900 || seekTarget != null) {
+    if (textNow || now - lastText > 900) {
       lastText = now;
       setText(tNow, clock(ms));
       setText(tLeft, '−' + clock(duration - ms));
@@ -243,10 +262,13 @@ export function PlayerScreen(initial, { offset = null } = {}) {
     }
   }
 
+  // Time ticks draw the bar only while it is visible, so every way of showing the OSD comes
+  // through here and draws it first: the position, or the seek preview while there is one.
   function showOsd(sticky) {
     toggleClass(el, 'osd-on', true);
     clearTimeout(osdTimer);
     if (!sticky && !paused) osdTimer = setTimeout(hideOsd, ctrl >= 0 ? CONTROLS_HIDE_MS : OSD_HIDE_MS);
+    renderProgress(seekTarget == null ? position : seekTarget, true);
     renderControls();
     renderSkip();
   }
@@ -408,10 +430,13 @@ export function PlayerScreen(initial, { offset = null } = {}) {
     return directOk && subsOk ? 'direct' : 'hls';
   }
 
-  async function open(atMs) {
+  // useStart: let AVPlay begin at atMs by itself (direct play only); open() clears it to retry.
+  async function open(atMs, useStart = true) {
     const server = session.server;
     const t0 = Date.now();
+    const turn = ++opening;
     started = false;
+    trackTries = 0;
     toggleClass(spinner, 'on', true);
     errorEl.classList.add('hidden');
     let url;
@@ -448,12 +473,38 @@ export function PlayerScreen(initial, { offset = null } = {}) {
       if (mc.generalDecisionCode && mc.generalDecisionCode >= 2000) throw new Error(mc.generalDecisionText || 'Server refused to convert this file');
     }
     log('play', mode, item.title, media.container + '/' + media.videoCodec + '/' + (audioStream && audioStream.codec), 'at', clock(atMs));
-    player.open(url, { uhd: media.videoResolution === '4k' && supports4K() });
-    await player.prepare();
+    // A resumed direct play hands AVPlay the position before prepare, so it fills its buffer
+    // once, there, rather than at 0:00 during prepare and a second time after a seek.
+    const startSet = player.open(url, {
+      uhd: media.videoResolution === '4k' && supports4K(),
+      startMs: useStart && mode === 'direct' ? atMs : 0,
+    });
+    try {
+      // The start position is new to this TV, so a prepare that it stalls is not waited on for ever.
+      await (startSet ? within(player.prepare(), START_WAIT_MS) : player.prepare());
+    } catch (e) {
+      // With a start position set, that is the first suspect: once more without it, before
+      // failed() gives up on direct play for a file that the seek after prepare can resume.
+      if (!startSet || !alive || turn !== opening) throw e;
+      warn('prepare failed with a start position (' + e.message + '), opening again without it');
+      return open(atMs, false);
+    }
     if (!alive) return;
     if (mode === 'direct') {
-      applyTracks();
-      if (atMs > 0) await player.seek(atMs);
+      // AVPlay's own subtitles can be silenced before the first frame; track choices can't.
+      if (!isEmbeddedText(subStream)) player.selectText(null);
+      if (atMs > 0) {
+        // Where AVPlay stands now says whether it took the start position. A TV that ignored
+        // it is still at 0 and gets the seek it always got.
+        const at = player.time();
+        if (at > 0 && Math.abs(at - atMs) <= START_SLACK_MS) {
+          log('start position taken by AVPlay: at ' + clock(at) + ' after prepare, no seek');
+        } else {
+          log('seek after prepare: ' + (startSet ? 'AVPlay is at ' + clock(at) + ' despite the start position'
+            : useStart ? 'the start position was not accepted' : 'prepare failed with a start position'));
+          await player.seek(atMs);
+        }
+      }
     }
     syncSidecar();
     player.play();
@@ -466,22 +517,60 @@ export function PlayerScreen(initial, { offset = null } = {}) {
     report('playing');
     startTimeline();
     renderControls();
+    // Only now: a direct-played file takes a track choice once it is playing, not before.
+    if (mode === 'direct') queueTracks();
+  }
+
+  // Hand Plex's chosen audio and subtitle streams to AVPlay. For a direct-played file AVPlay
+  // switches tracks only while it is playing (in READY that is Smooth Streaming only), and
+  // after prepareAsync it won't even list them before then. So this is asked once playback
+  // runs, and asked again on the next time ticks for as long as AVPlay turns it down.
+  function queueTracks() {
+    trackTries = TRACK_TRIES;
+    audioSet = false;
+    textSet = false;
+    if (!isEmbeddedText(subStream)) setText(subs, '');   // drop whatever AVPlay last drew
+    tryTracks();
+  }
+
+  function tryTracks() {
+    if (!trackTries || !started || mode !== 'direct') return;
+    if (applyTracks()) { trackTries = 0; return; }
+    if (paused) return;   // audio can't be switched while paused; this runs again on resume
+    if (--trackTries === 0) warn('AVPlay did not take the audio/subtitle choice');
   }
 
   // Map Plex's chosen streams onto AVPlay's track list (same file order).
+  // False while AVPlay has no track list yet or refused a switch.
   function applyTracks() {
     const t = player.tracks();
-    if (audioStream && t.audio.length > 1) {
-      const pos = streamsOf(part, 2).indexOf(audioStream);
-      if (pos >= 0 && t.audio[pos] != null) player.selectAudio(t.audio[pos]);
-    }
+    // Turning AVPlay's own subtitles off needs no track list, so it never waits for one.
+    if (!textSet && !isEmbeddedText(subStream)) textSet = applyText(t);
+    if (!t.ready) return false;
+    if (!audioSet) audioSet = applyAudio(t);
+    if (!textSet) textSet = applyText(t);
+    return audioSet && textSet;
+  }
+
+  function applyAudio(t) {
+    if (!audioStream || t.audio.length < 2) return true;
+    const pos = streamsOf(part, 2).indexOf(audioStream);
+    const want = pos < 0 ? null : t.audio[pos];
+    if (want == null) return true;        // AVPlay doesn't list this one: nothing to pick
+    const now = player.currentAudio();
+    if (now === want) return true;        // already the track that is playing
+    if (!player.selectAudio(want)) return false;
+    log('audio track ' + (pos + 1) + ' of ' + t.audio.length + ' selected (AVPlay index ' + now + ' -> ' + want + ')');
+    return true;
+  }
+
+  function applyText(t) {
     if (isEmbeddedText(subStream)) {
       const pos = streamsOf(part, 3).filter(isEmbeddedText).indexOf(subStream);
-      if (pos >= 0 && t.text[pos] != null) player.selectText(t.text[pos]);
-    } else {
-      player.selectText(null);
-      setText(subs, '');
+      return pos < 0 || t.text[pos] == null || player.selectText(t.text[pos]);
     }
+    // Off, or a file we draw ourselves: keep AVPlay's own subtitles quiet.
+    return player.selectText(null);
   }
 
   // Start/stop drawing an external subtitle file for the current selection.
@@ -503,12 +592,18 @@ export function PlayerScreen(initial, { offset = null } = {}) {
         if (cueFor !== stream || !alive) return;
         cueTrack = new CueTrack(parseSubtitles(text, stream.codec));
         log('subtitles loaded', stream.displayTitle, cueTrack.cues.length + ' cues');
+        drawCue();   // a file picked during a pause shows on the paused picture
       })
       .catch(e => warn('subtitle fetch failed', e.message));
     clearInterval(cueTimer);
-    cueTimer = setInterval(() => {
-      if (cueTrack && started) setText(subs, cueTrack.at(base + player.time() - fileOpts.delay));
-    }, 120);
+    // Idle during a pause: the picture stands still, and asking AVPlay the time is a native call.
+    cueTimer = setInterval(() => { if (!paused) drawCue(); }, 120);
+  }
+
+  // Show what the external subtitle file says at this moment. The timer does this while
+  // playing; anything that changes the answer during a pause has to call it itself.
+  function drawCue() {
+    if (cueTrack && started) setText(subs, cueTrack.at(base + player.time() - fileOpts.delay));
   }
 
   async function start() {
@@ -529,7 +624,6 @@ export function PlayerScreen(initial, { offset = null } = {}) {
       mode = decideMode();
       if (offset == null) offset = item.viewOffset || 0;
       position = offset;
-      renderProgress(position);
       showOsd();
       await open(offset);
     } catch (e) {
@@ -565,6 +659,7 @@ export function PlayerScreen(initial, { offset = null } = {}) {
     } else {
       player.pause();
       paused = true;
+      drawCue();   // the subtitle of the picture it stopped on; the timer rests from here
       showOsd(true);
     }
     toggleClass(el, 'paused', paused);
@@ -587,8 +682,7 @@ export function PlayerScreen(initial, { offset = null } = {}) {
     seekTarget = Math.max(0, Math.min(duration - 3000, from + delta));
     toggleClass(el, 'seeking', true);
     setText(seekLabel, clock(seekTarget));
-    renderProgress(seekTarget);
-    showOsd(true);
+    showOsd(true);   // draws the bar at the target
     clearTimeout(seekTimer);
     seekTimer = setTimeout(commitSeek, SEEK_COMMIT_MS);
   }
@@ -598,9 +692,9 @@ export function PlayerScreen(initial, { offset = null } = {}) {
     if (seekTarget == null) return;
     const target = seekTarget;
     seekTarget = null;
+    position = target;   // before showOsd(), which draws the bar from it
     toggleClass(el, 'seeking', false);
     showOsd();
-    position = target;
     try {
       if (mode === 'direct') {
         toggleClass(spinner, 'on', true);
@@ -620,8 +714,10 @@ export function PlayerScreen(initial, { offset = null } = {}) {
 
   let panelCol = 0;
   let panelIndex = [0, 0, 0];
+  let panelTop = [0, 0, 0];   // first option each column shows; a long list slides under the focus
   let panelLists = [[], [], []];
   let panelMode = 'tracks';   // 'tracks' | 'search'
+  let panelDom = null;        // the panel's nodes as last built (see renderPanel)
   // Online subtitle search: results come from the server's subtitle agent.
   const search = { results: [], index: 0, status: '', busy: false, generation: 0 };
 
@@ -636,6 +732,8 @@ export function PlayerScreen(initial, { offset = null } = {}) {
       playbackOptions(),
     ];
     panelIndex = panelLists.map(l => Math.max(0, l.findIndex(x => x.on)));
+    // A long list opens with the current choice mid-window (renderTracks keeps this in range).
+    panelTop = panelIndex.map(i => i - Math.floor(TRACK_ROWS / 2));
     panelCol = col || 0;
     panelMode = 'tracks';
     renderPanel();
@@ -677,6 +775,7 @@ export function PlayerScreen(initial, { offset = null } = {}) {
     if (opt.delayBy != null) {
       fileOpts.delay = opt.delayBy ? Math.max(-60000, Math.min(60000, fileOpts.delay + opt.delayBy)) : 0;
       saveFileOpts(item.ratingKey, fileOpts);
+      drawCue();   // at once, also in a pause, so the new timing can be judged against the picture
     } else if (opt.size) {
       const next = SUB_SIZES[(subSizeIndex() + 1) % SUB_SIZES.length][0];
       SUB_SIZES.forEach(z => toggleClass(el, 'subs-' + z[0], z[0] === next));
@@ -692,48 +791,94 @@ export function PlayerScreen(initial, { offset = null } = {}) {
     search.busy = false;
   }
 
+  // The panel's nodes are built for a mode and a number of rows per column, then kept. A key
+  // press that only moves the focus flips two classes; when a column's window slides or a
+  // label changes, the same rows get new text. (setText and toggleClass skip what is unchanged.)
   function renderPanel() {
+    const built = panelDom && panelDom.mode === panelMode && (panelMode === 'search' ||
+      panelDom.cols.every((col, c) => col.rows.length === Math.min(panelLists[c].length, TRACK_ROWS)));
+    if (!built) buildPanel();
+    if (panelMode === 'search') renderSearch(); else renderTracks();
+  }
+
+  function buildPanel() {
     panel.innerHTML = '';
     toggleClass(panel, 'searching', panelMode === 'search');
-    if (panelMode === 'search') { renderSearch(); return; }
-    ['Audio', 'Subtitles', 'Playback'].forEach((name, c) => {
+    const column = (icon, name) => {
       const col = h('div', 'tracks-col', panel);
       const head = h('div', 'tracks-head', col);
-      head.innerHTML = [icons.audio, icons.subtitles, icons.gear][c];
+      head.innerHTML = icon;
       h('span', '', head).textContent = name;
-      panelLists[c].forEach((opt, i) => {
-        const row = h('div', 'tracks-opt', col);
-        row.textContent = opt.label;
+      return col;
+    };
+    if (panelMode === 'search') {
+      const col = column(icons.search, 'Search subtitles');
+      panelDom = { mode: 'search', lang: h('div', 'tracks-lang', col), status: h('div', 'tracks-status', col), rows: [] };
+      for (let k = 0; k < SEARCH_ROWS; k++) {
+        const row = h('div', 'tracks-opt tracks-result', col);
+        panelDom.rows.push({ row, title: h('div', 'tracks-result-title', row), meta: h('div', 'tracks-result-meta', row) });
+      }
+      panelDom.foot = h('div', 'tracks-foot', col);
+      return;
+    }
+    const cols = [[icons.audio, 'Audio'], [icons.subtitles, 'Subtitles'], [icons.gear, 'Playback']].map(([icon, name], c) => {
+      const col = column(icon, name);
+      // At most TRACK_ROWS rows: a longer list slides through them, and a marker above and
+      // one below say how much of it lies beyond.
+      const up = h('div', 'tracks-more tracks-more-up', col);
+      const rows = panelLists[c].slice(0, TRACK_ROWS).map(() => h('div', 'tracks-opt', col));
+      return { up, rows, down: h('div', 'tracks-more tracks-more-down', col) };
+    });
+    panelDom = { mode: 'tracks', cols };
+  }
+
+  function renderTracks() {
+    panelDom.cols.forEach((col, c) => {
+      const list = panelLists[c];
+      const i = panelIndex[c];
+      // Slide the window only as far as it takes to hold the focused option.
+      let top = Math.min(panelTop[c], i);
+      if (i >= top + TRACK_ROWS) top = i - TRACK_ROWS + 1;
+      top = panelTop[c] = Math.max(0, Math.min(list.length - col.rows.length, top));
+      col.rows.forEach((row, k) => {
+        const opt = list[top + k];
+        setText(row, opt.label);
         toggleClass(row, 'on', opt.on);
-        toggleClass(row, 'focus', c === panelCol && i === panelIndex[c]);
+        toggleClass(row, 'focus', c === panelCol && top + k === i);
       });
+      renderMore(col.up, top);
+      renderMore(col.down, list.length - top - col.rows.length);
     });
   }
 
+  // How many options lie beyond one end of a column's window; invisible when none do.
+  function renderMore(more, n) {
+    toggleClass(more, 'on', n > 0);
+    if (n > 0) setText(more, n + ' more');
+  }
+
   function renderSearch() {
-    const col = h('div', 'tracks-col', panel);
-    const head = h('div', 'tracks-head', col);
-    head.innerHTML = icons.search;
-    h('span', '', head).textContent = 'Search subtitles';
-    h('div', 'tracks-lang', col).textContent = '◀  ' + subtitleLanguage()[1] + '  ▶';
-    h('div', 'tracks-status', col).textContent = search.status;
     const n = search.results.length;
+    setText(panelDom.lang, '◀  ' + subtitleLanguage()[1] + '  ▶');
+    setText(panelDom.status, search.status);
     const top = Math.max(0, Math.min(n - SEARCH_ROWS, search.index - Math.floor(SEARCH_ROWS / 2)));
-    search.results.slice(top, top + SEARCH_ROWS).forEach((r, k) => {
-      const row = h('div', 'tracks-opt tracks-result', col);
-      h('div', 'tracks-result-title', row).textContent = r.title || r.extendedDisplayTitle || r.displayTitle || 'Subtitle';
+    panelDom.rows.forEach((slot, k) => {
+      const r = search.results[top + k];
+      toggleClass(slot.row, 'hidden', !r);
+      toggleClass(slot.row, 'focus', !!r && !search.busy && top + k === search.index);
+      if (!r) return;
+      setText(slot.title, r.title || r.extendedDisplayTitle || r.displayTitle || 'Subtitle');
       const bits = [r.providerTitle, (r.codec || '').toUpperCase()];
       if (r.downloaded) bits.push('Downloaded');
       if (r.strictness >= 3) bits.push('Matches this file');
       else if (r.strictness >= 2) bits.push('Same release');
       if (r.hearingImpaired) bits.push('SDH');
       if (r.forced) bits.push('Forced');
-      h('div', 'tracks-result-meta', row).textContent = bits.filter(Boolean).join('  ·  ');
-      toggleClass(row, 'focus', !search.busy && top + k === search.index);
+      setText(slot.meta, bits.filter(Boolean).join('  ·  '));
     });
-    h('div', 'tracks-foot', col).textContent = n
+    setText(panelDom.foot, n
       ? (search.index + 1) + ' of ' + n + '   ·   OK to download   ·   ◀ ▶ language'
-      : '◀ ▶ language   ·   Back to return';
+      : '◀ ▶ language   ·   Back to return');
   }
 
   async function runSearch() {
@@ -814,20 +959,24 @@ export function PlayerScreen(initial, { offset = null } = {}) {
     const server = session.server;
     if (col === 0) audioStream = opt.stream;
     else subStream = opt.stream;
-    server.selectStreams(part.id, {
+    const saved = server.selectStreams(part.id, {
       audioStreamID: audioStream ? audioStream.id : undefined,
       subtitleStreamID: subStream ? subStream.id : 0,
     });
     closePanel();
     const wanted = decideMode();
     if (wanted === 'direct' && mode === 'direct') {
-      applyTracks();
+      queueTracks();
       syncSidecar();
     } else if (mode === 'hls' && wanted === 'hls' && col === 1 && isSidecarText(subStream)) {
       syncSidecar();
     } else {
       mode = wanted;
       triedFallback = false;
+      // A converted stream carries whichever audio the server has saved for this file,
+      // so the new choice has to be saved before the stream is requested again.
+      if (wanted === 'hls') await saved;
+      if (!alive) return;
       await open(position).catch(e => failed(e.message));
     }
   }
@@ -889,16 +1038,18 @@ export function PlayerScreen(initial, { offset = null } = {}) {
     const playing = item;
     let prev = null;
     let next = null;
+    // A season's list is large and every episode start wants it: an answer up to five minutes old will do.
+    const reuse = { maxAge: 300000 };
     try {
-      const eps = await server.children(playing.parentRatingKey);
+      const eps = await server.children(playing.parentRatingKey, reuse);
       const i = eps.findIndex(e => e.ratingKey === playing.ratingKey);
       if (i > 0) prev = eps[i - 1];
       if (i >= 0 && i < eps.length - 1) next = eps[i + 1];
       if (!prev || !next) {
-        const seasons = (await server.children(playing.grandparentRatingKey)).filter(s => s.type === 'season');
+        const seasons = (await server.children(playing.grandparentRatingKey, reuse)).filter(s => s.type === 'season');
         const si = seasons.findIndex(s => s.ratingKey === playing.parentRatingKey);
-        if (!next && si >= 0 && si < seasons.length - 1) next = (await server.children(seasons[si + 1].ratingKey))[0] || null;
-        if (!prev && si > 0) prev = (await server.children(seasons[si - 1].ratingKey)).pop() || null;
+        if (!next && si >= 0 && si < seasons.length - 1) next = (await server.children(seasons[si + 1].ratingKey, reuse))[0] || null;
+        if (!prev && si > 0) prev = (await server.children(seasons[si - 1].ratingKey, reuse)).pop() || null;
       }
     } catch (e) {
       warn('could not load neighbouring episodes', e.message);
@@ -1067,7 +1218,7 @@ export function PlayerScreen(initial, { offset = null } = {}) {
         case 'prev': case 'pagedown': jumpTo(prevItem); return true;
         case 'stop': exit(); return true;
         case 'back':
-          if (seekTarget != null) { seekTarget = null; clearTimeout(seekTimer); toggleClass(el, 'seeking', false); renderProgress(position); showOsd(); return true; }
+          if (seekTarget != null) { seekTarget = null; clearTimeout(seekTimer); toggleClass(el, 'seeking', false); showOsd(); return true; }
           if (onButtons && paused) { ctrl = -1; showOsd(true); return true; }
           if (osdOn && !paused) { hideOsd(); return true; }
           exit();

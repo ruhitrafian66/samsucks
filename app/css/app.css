@@ -395,6 +395,18 @@ html.fast .row-track, html.fast .rows-track, html.fast .grid-track, html.fast .r
 .tracks-opt.on { color: var(--cream); }
 .tracks-opt.on::before { content: '✓  '; color: var(--coral); }
 .tracks-opt.focus { background: var(--cream); color: var(--bg); }
+/* A long column shows a window of its options (TRACK_ROWS in player.js); these say how many
+   more lie above and below it. Each keeps its place when it has nothing to say, and the upper
+   one sits in the gap under the column head, so no row moves when they come and go. */
+.tracks-more {
+  height: 24px; padding-left: 22px; visibility: hidden;
+  font: 500 18px/24px var(--body); color: var(--dim); white-space: nowrap;
+}
+.tracks-more.on { visibility: visible; }
+.tracks-more::before { content: ''; display: inline-block; margin-right: 10px; border: 7px solid transparent; }
+.tracks-more-up { margin-top: -24px; }
+.tracks-more-up::before { border-top-width: 0; border-bottom: 9px solid currentColor; }
+.tracks-more-down::before { border-bottom-width: 0; border-top: 9px solid currentColor; }
 
 /* Online subtitle search takes over the whole panel. */
 .tracks.searching { padding-top: 80px; padding-bottom: 60px; }
